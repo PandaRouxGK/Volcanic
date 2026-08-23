@@ -4,7 +4,9 @@ import com.mojang.blaze3d.vertex.VertexFormat;
 import com.mojang.blaze3d.vertex.VertexFormatElement;
 import it.unimi.dsi.fastutil.objects.Object2LongMap;
 import it.unimi.dsi.fastutil.objects.Object2LongOpenHashMap;
+import net.vulkanmod.Initializer;
 import net.vulkanmod.compat.observer.CompatProfiler;
+import net.vulkanmod.gl.GlVertexArray;
 import net.vulkanmod.interfaces.VertexFormatMixed;
 import net.vulkanmod.vulkan.Renderer;
 import net.vulkanmod.vulkan.Vulkan;
@@ -327,7 +329,21 @@ public class GraphicsPipeline extends Pipeline {
 
         bindingDescription.binding(0);
         bindingDescription.stride(vertexFormat.getVertexSize());
-        bindingDescription.inputRate(VK_VERTEX_INPUT_RATE_VERTEX);
+
+        int divisor = GlVertexArray.getAttribDivisor(0);
+
+        // This fix concerns GL33 emulation
+        // It fixes vertex divisor not being set correctly
+        // Required by Veil
+        if (divisor == 0)
+            bindingDescription.inputRate(VK_VERTEX_INPUT_RATE_VERTEX);
+        else if (divisor == 1)
+            bindingDescription.inputRate(VK_VERTEX_INPUT_RATE_INSTANCE);
+        else {
+            bindingDescription.inputRate(VK_VERTEX_INPUT_RATE_VERTEX);
+
+            Initializer.LOGGER.warn("Vertex divisor is not supported, using VK_VERTEX_INPUT_RATE_VERTEX instead of VK_VERTEX_INPUT_RATE_INSTANCE");
+        }
 
         return bindingDescription;
     }

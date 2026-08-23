@@ -2,6 +2,7 @@ package net.vulkanmod.mixin.compatibility.gl;
 
 import net.vulkanmod.gl.GlQuery;
 import net.vulkanmod.gl.GlSampler;
+import net.vulkanmod.gl.GlVertexArray;
 import org.lwjgl.opengl.GL33C;
 import org.lwjgl.system.NativeType;
 import org.spongepowered.asm.mixin.Mixin;
@@ -50,8 +51,14 @@ public class GL33M {
         }
     }
 
+    /**
+     * @author RevoJava
+     * @reason Avoid a Veil crash caused using GL 3.3
+     */
     @Overwrite(remap = false)
+    @NativeType("void")
     public static void glVertexAttribDivisor(@NativeType("GLuint") int index, @NativeType("GLuint") int divisor) {
+        GlVertexArray.setAttribDivisor(index, divisor);
     }
 
     @Overwrite(remap = false)
