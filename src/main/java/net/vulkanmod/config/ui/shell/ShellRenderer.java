@@ -36,11 +36,9 @@ import net.vulkanmod.config.ui.core.PresetCardLayout;
 import net.vulkanmod.config.ui.core.PresetCardModel;
 import net.vulkanmod.config.ui.core.PresetRating;
 import net.vulkanmod.config.ui.settings.OverviewSignals;
-import net.vulkanmod.vulkan.SessionSamples;
 import net.vulkanmod.config.ui.core.Gradient;
 import net.vulkanmod.config.ui.core.Glide;
 import net.vulkanmod.config.ui.core.HoverState;
-import net.vulkanmod.config.ui.core.ImpactLevel;
 import net.vulkanmod.Initializer;
 import net.vulkanmod.config.ui.core.CoalArt;
 import net.vulkanmod.config.ui.core.CoalScene;
@@ -298,15 +296,17 @@ public final class ShellRenderer {
         if (deltaMs < 0) {
             throw new IllegalArgumentException("deltaMs must not be negative: " + deltaMs);
         }
-        deltaMs = motionEnabled() ? deltaMs : INSTANT_MS;
+
+        long uiDeltaMs = motionEnabled() ? deltaMs : INSTANT_MS;
+
         this.lastCard = Rect.EMPTY;
-        rowRenderer.tick(deltaMs);
+        rowRenderer.tick(uiDeltaMs);
         this.searchElapsed = searchFocused == searchWasOpen
                 ? Math.min(this.searchElapsed + deltaMs, Motion.PAGE_MS) : 0L;
         this.searchWasOpen = searchFocused;
 
-        advancePage(presenter, deltaMs);
-        presetFx.advance(deltaMs);
+        advancePage(presenter, uiDeltaMs);
+        presetFx.advance(uiDeltaMs);
 
         paintChrome(painter, layout, drawerOpen, searchFocused);
         painter.flush();
@@ -316,7 +316,7 @@ public final class ShellRenderer {
 
         Rect nav = layout.sidebarOrDrawer(drawerOpen);
         if (!layout.hasDrawer()) {
-            paintNav(graphics, painter, nav, presenter, scroll, mouseX, mouseY, deltaMs);
+            paintNav(graphics, painter, nav, presenter, scroll, mouseX, mouseY, uiDeltaMs);
         }
 
         Rect content = layout.content();
@@ -324,16 +324,16 @@ public final class ShellRenderer {
             float reveal = Motion.easeOut(pageElapsed, Motion.PAGE_MS);
             graphics.enableScissor(content.x(), content.y(), content.right(), content.bottom());
             try {
-                paintCoals(graphics, painter, content, deltaMs);
+                paintCoals(graphics, content, deltaMs);
                 painter.flush();
                 painter.setOffset(Motion.slide(reveal, pageDirection, Motion.PAGE_TRAVEL), 0);
                 paintContent(graphics, painter, font, layout, presenter, contentScroll, mouseX, mouseY,
-                        dragged, keyboardMode, deltaMs);
+                        dragged, keyboardMode, uiDeltaMs);
                 painter.flush();
                 painter.setOffset(pageDirection == 0
                         ? Motion.slide(reveal, 0, Motion.PAGE_TRAVEL) : 0, 0);
-                paintBand(graphics, painter, font, layout, presenter, deltaMs);
-                paintScrollIndicator(painter, layout, presenter, contentScroll, deltaMs);
+                paintBand(graphics, painter, font, layout, presenter, uiDeltaMs);
+                paintScrollIndicator(painter, layout, presenter, contentScroll, uiDeltaMs);
                 painter.flush();
             } finally {
                 painter.setOffset(0, 0);
@@ -366,14 +366,14 @@ public final class ShellRenderer {
             drawerSlide.jumpTo(drawer.width() + 1.0f);
         } else {
             float hidden = drawer.width() + 1;
-            int shift = Math.round(drawerSlide.advance(drawerOpen ? 0.0f : hidden, deltaMs));
+            int shift = Math.round(drawerSlide.advance(drawerOpen ? 0.0f : hidden, uiDeltaMs));
             if (shift < hidden) {
                 float openness = 1.0f - shift / hidden;
                 painter.fill(layout.content(),
                         theme.color(ColorToken.SURFACE_SUNKEN, SCRIM_ALPHA * openness));
                 painter.flush();
                 painter.setOffset(-shift, 0);
-                paintNav(graphics, painter, drawer, presenter, scroll, mouseX, mouseY, deltaMs);
+                paintNav(graphics, painter, drawer, presenter, scroll, mouseX, mouseY, uiDeltaMs);
                 painter.fill(new Rect(drawer.right(), drawer.y(), 1, drawer.height()),
                         theme.color(ColorToken.BORDER_ACCENT));
                 painter.flush();
@@ -381,7 +381,7 @@ public final class ShellRenderer {
             }
         }
 
-        paintApplyBar(painter, font, layout, presenter, mouseX, mouseY, deltaMs);
+        paintApplyBar(painter, font, layout, presenter, mouseX, mouseY, uiDeltaMs);
         painter.flush();
 
         hover.endFrame();
@@ -1123,7 +1123,7 @@ public final class ShellRenderer {
         }
     }
 
-    private void paintCoals(GuiGraphics graphics, SurfacePainter painter, Rect content, long deltaMs) {
+    private void paintCoals(GuiGraphics graphics, Rect content, long deltaMs) {
         boolean alive = backgroundEnabled();
         if (alive) {
             coals.advance(deltaMs, content);
