@@ -9,11 +9,11 @@ import net.vulkanmod.compat.observer.CompatProfiler;
 import net.vulkanmod.compat.observer.GuiRenderTrace;
 import net.vulkanmod.gl.GlFramebuffer;
 import net.vulkanmod.mixin.window.WindowAccessor;
+import net.vulkanmod.plugin.HookRegistry;
 import net.vulkanmod.plugin.PluginRegistry;
-import net.vulkanmod.render.context.RenderContext;
+import net.vulkanmod.plugin.hooks.events.render.frame.FrameBeginBeforeEvent;
 import net.vulkanmod.render.chunk.WorldRenderer;
 import net.vulkanmod.render.chunk.buffer.UploadManager;
-import net.vulkanmod.render.context.RenderContextProvider;
 import net.vulkanmod.render.optimization.AdaptiveChunkUploadBudget;
 import net.vulkanmod.vulkan.device.DeviceManager;
 import net.vulkanmod.vulkan.framebuffer.Framebuffer;
@@ -231,6 +231,8 @@ public class Renderer {
 
         vkWaitForFences(device, inFlightFences.get(currentFrame), true, VUtil.UINT64_MAX);
 
+        HookRegistry.post((FrameBeginBeforeEvent) System::currentTimeMillis);
+
         if (FrameTimer.instance() != null) {
             FrameTimer.instance().onBeginFrame(currentFrame);
             frameTimestampArmed = true;
@@ -289,6 +291,7 @@ public class Renderer {
         recordingCmds = true;
         if (frameStart) {
             CalderaBridge.onFrameBegin(commandBuffer);
+            CalderaBridge.cullLodFrame(commandBuffer);
         }
         mainPass.begin(commandBuffer, stack);
 
@@ -314,12 +317,12 @@ public class Renderer {
         SessionSamples.onFrameEnd();
 
         if (CompatProfiler.ENABLED || Initializer.CONFIG.adaptiveChunkUploads) {
-            long duration = System.nanoTime() - net.vulkanmod.compat.observer.CompatProfiler.cpuFrameStart;
+            long duration = System.nanoTime() - CompatProfiler.cpuFrameStart;
             float cpuRenderTimeMs = duration * 0.000001f;
             if (Initializer.CONFIG.adaptiveChunkUploads) {
                 AdaptiveChunkUploadBudget.recordFrameTimeMs(cpuRenderTimeMs);
             }
-            if (!net.vulkanmod.compat.observer.CompatProfiler.ENABLED) {
+            if (!CompatProfiler.ENABLED) {
                 return;
             }
             CompatProfiler.recordFrame(cpuRenderTimeMs);

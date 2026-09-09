@@ -2,7 +2,9 @@ package net.vulkanmod.vulkan.device;
 
 import it.unimi.dsi.fastutil.objects.ObjectArrayList;
 import net.vulkanmod.Initializer;
+import net.vulkanmod.vulkan.MoltenVKConfig;
 import net.vulkanmod.vulkan.VRenderSystem;
+import net.vulkanmod.vulkan.VkSurfaceUtil;
 import net.vulkanmod.vulkan.Vulkan;
 import net.vulkanmod.vulkan.queue.*;
 import org.lwjgl.PointerBuffer;
@@ -11,14 +13,15 @@ import org.lwjgl.vulkan.*;
 
 import java.nio.IntBuffer;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 import static java.util.stream.Collectors.toSet;
 import static net.vulkanmod.vulkan.queue.Queue.findQueueFamilies;
 import static net.vulkanmod.vulkan.util.VUtil.asPointerBuffer;
 import static org.lwjgl.system.MemoryStack.stackGet;
 import static org.lwjgl.system.MemoryStack.stackPush;
-import static org.lwjgl.vulkan.EXTDebugUtils.VK_EXT_DEBUG_UTILS_EXTENSION_NAME;
 import static org.lwjgl.vulkan.KHRSurface.*;
 import static org.lwjgl.vulkan.VK10.*;
 import static org.lwjgl.vulkan.VK12.VK_API_VERSION_1_2;
@@ -171,7 +174,7 @@ public abstract class DeviceManager {
     public static void createLogicalDevice() {
         try (MemoryStack stack = stackPush()) {
 
-            net.vulkanmod.vulkan.queue.Queue.QueueFamilyIndices indices = findQueueFamilies(physicalDevice);
+            Queue.QueueFamilyIndices indices = findQueueFamilies(physicalDevice);
 
             int[] uniqueQueueFamilies = indices.unique();
 
@@ -216,14 +219,13 @@ public abstract class DeviceManager {
 
             }
 
-            // via the loader (validation mode) the portability driver requires VK_KHR_portability_subset
-            java.util.Set<String> deviceExtensions = new java.util.HashSet<>(Vulkan.REQUIRED_EXTENSION);
-            if (net.vulkanmod.vulkan.MoltenVKConfig.validationEnabled()) {
-                deviceExtensions.add(org.lwjgl.vulkan.KHRPortabilitySubset.VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME);
-            }
-            if (device.isDrawIndirectCountSupported()) {
+            Set<String> deviceExtensions = new HashSet<>(Vulkan.REQUIRED_EXTENSION);
+            if (MoltenVKConfig.validationEnabled())
+                deviceExtensions.add(KHRPortabilitySubset.VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME);
+
+            if (device.isDrawIndirectCountSupported())
                 deviceExtensions.add(KHRDrawIndirectCount.VK_KHR_DRAW_INDIRECT_COUNT_EXTENSION_NAME);
-            }
+
             createInfo.ppEnabledExtensionNames(asPointerBuffer(deviceExtensions));
 
             createInfo.ppEnabledLayerNames(Vulkan.ENABLE_VALIDATION_LAYERS ? asPointerBuffer(Vulkan.VALIDATION_LAYERS) : null);
@@ -243,7 +245,7 @@ public abstract class DeviceManager {
     }
 
     private static PointerBuffer getRequiredExtensions() {
-        return net.vulkanmod.vulkan.VkSurfaceUtil.getRequiredInstanceExtensions(stackGet(), Vulkan.ENABLE_VALIDATION_LAYERS);
+        return VkSurfaceUtil.getRequiredInstanceExtensions(stackGet(), Vulkan.ENABLE_VALIDATION_LAYERS);
     }
 
     private static boolean isDeviceSuitable(VkPhysicalDevice device) {

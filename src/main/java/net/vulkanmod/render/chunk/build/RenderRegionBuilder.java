@@ -1,6 +1,7 @@
 package net.vulkanmod.render.chunk.build;
 
 import it.unimi.dsi.fastutil.longs.Long2ReferenceLinkedOpenHashMap;
+import it.unimi.dsi.fastutil.longs.Long2ReferenceOpenHashMap;
 import net.minecraft.core.SectionPos;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.Level;
@@ -16,7 +17,12 @@ public class RenderRegionBuilder {
     private static final DataLayer DEFAULT_BLOCK_LIGHT_DATA_LAYER = new DataLayer(0);
 
     private static final int MAX_CACHE_ENTRIES = 256;
+
     private final Long2ReferenceLinkedOpenHashMap<LevelChunk> levelChunkCache = new Long2ReferenceLinkedOpenHashMap<>(MAX_CACHE_ENTRIES);
+
+    private final Long2ReferenceOpenHashMap<PalettedContainer<BlockState>> sectionCopyCache = new Long2ReferenceOpenHashMap<>();
+    //private final Long2ReferenceOpenHashMap<DataLayer[]> sectionDataLayersCache = new Long2ReferenceOpenHashMap<>();
+    // TODO: finish light data layer handling
 
     public RenderRegion createRegion(Level level, int secX, int secY, int secZ) {
         LevelChunk levelChunk = getLevelChunk(level, secX, secZ);
@@ -37,7 +43,7 @@ public class RenderRegionBuilder {
 
         PalettedContainer<BlockState>[] blockData = new PalettedContainer[RenderRegion.SIZE];
 
-        DataLayer[][] lightData = new DataLayer[RenderRegion.SIZE][2 /* Light types */];
+        DataLayer[][] lightData = new DataLayer[RenderRegion.SIZE][2];
 
         final int minHeightSec = level.getMinBuildHeight() >> 4;
         for (int x = minSecX; x <= maxSecX; ++x) {
@@ -52,7 +58,15 @@ public class RenderRegionBuilder {
                     final int relX = (x - minSecX), relY = (y - minSecY), relZ = (z - minSecZ);
                     final int idx = (relY * RenderRegion.WIDTH + relZ) * RenderRegion.WIDTH + relX;
 
-                    PalettedContainer<BlockState> values = section == null || section.hasOnlyAir() ? null : section.getStates().copy();
+                    long sectionKey = SectionPos.asLong(x, y, z);
+                    PalettedContainer<BlockState> values;
+
+                    if (sectionCopyCache.containsKey(sectionKey))
+                        values = sectionCopyCache.get(sectionKey);
+                    else {
+                        values = section == null || section.hasOnlyAir() ? null : section.getStates().copy();
+                        sectionCopyCache.put(sectionKey, values);
+                    }
 
                     blockData[idx] = values;
 
@@ -65,6 +79,10 @@ public class RenderRegionBuilder {
         }
 
         return new RenderRegion(level, secX, secY, secZ, blockData, lightData, entityMap);
+    }
+
+    public void clearBatchCache() {
+        this.sectionCopyCache.clear();
     }
 
     private DataLayer[] getSectionDataLayers(Level level, SectionPos pos) {
@@ -115,5 +133,6 @@ public class RenderRegionBuilder {
 
     public void clear() {
         this.levelChunkCache.clear();
+        this.sectionCopyCache.clear();
     }
 }

@@ -66,30 +66,27 @@ public final class LodCulling {
                                   IndirectBuffer indirectBuffer, long indirectOffset, int drawCount,
                                   Matrix4f viewProj, int flags) {
         if (drawCount <= 0 || commandBuffer == null || aabbBuffer == null || indirectBuffer == null
-                || viewProj == null || !ensurePipeline()) {
+                || viewProj == null || !ensurePipeline())
             return false;
-        }
 
         Renderer renderer = Renderer.getInstance();
-        if (renderer == null || !Renderer.isRecording()) {
-            return false;
-        }
 
-        boolean suspended = renderer.getBoundRenderPass() != null;
-        if (suspended) {
-            renderer.endRenderPass();
-        }
+        if (renderer == null || !Renderer.isRecording())
+            return false;
+
+        if (renderer.getBoundRenderPass() != null)
+            return false;
 
         try (MemoryStack stack = stackPush()) {
             int effectiveFlags = flags & ~FLAG_COMPACT;
 
             VulkanImage pyramidImage = HiZPyramid.getSampleImage();
+
             if (pyramidImage == null) {
                 pyramidImage = HiZPyramid.getOrCreateFallback(commandBuffer, stack);
                 effectiveFlags &= ~FLAG_OCCLUSION;
-            } else if (!HiZPyramid.isReady()) {
+            } else if (!HiZPyramid.isReady())
                 effectiveFlags &= ~FLAG_OCCLUSION;
-            }
 
             cullPipeline.bind(commandBuffer);
             cullPipeline.bindResources(commandBuffer,
@@ -107,14 +104,11 @@ public final class LodCulling {
 
             indirectReadBarrier(commandBuffer, stack, indirectBuffer.getId(), indirectOffset,
                     (long) drawCount * INDIRECT_COMMAND_BYTES);
+
             return true;
         } catch (Throwable t) {
             Initializer.LOGGER.error("[LodCulling] prepare failed", t);
             return false;
-        } finally {
-            if (suspended) {
-                renderer.getMainPass().rebindMainTarget();
-            }
         }
     }
 
@@ -132,10 +126,8 @@ public final class LodCulling {
             return false;
         }
 
-        boolean suspended = renderer.getBoundRenderPass() != null;
-        if (suspended) {
-            renderer.endRenderPass();
-        }
+        if (renderer.getBoundRenderPass() != null)
+            return false;
 
         try (MemoryStack stack = stackPush()) {
             int effectiveFlags = flags | FLAG_COMPACT;
@@ -144,13 +136,13 @@ public final class LodCulling {
             if (pyramidImage == null) {
                 pyramidImage = HiZPyramid.getOrCreateFallback(commandBuffer, stack);
                 effectiveFlags &= ~FLAG_OCCLUSION;
-            } else if (!HiZPyramid.isReady()) {
+            } else if (!HiZPyramid.isReady())
                 effectiveFlags &= ~FLAG_OCCLUSION;
-            }
 
             vkCmdFillBuffer(commandBuffer, countBuffer.getId(), countOffset, 4, 0);
 
             VkBufferMemoryBarrier.Buffer fillBarrier = VkBufferMemoryBarrier.calloc(1, stack);
+
             fillBarrier.sType$Default();
             fillBarrier.srcQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED);
             fillBarrier.dstQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED);
@@ -159,6 +151,7 @@ public final class LodCulling {
             fillBarrier.size(4);
             fillBarrier.srcAccessMask(VK_ACCESS_TRANSFER_WRITE_BIT);
             fillBarrier.dstAccessMask(VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
+
             vkCmdPipelineBarrier(commandBuffer,
                     VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                     0, null, fillBarrier, null);
@@ -189,10 +182,6 @@ public final class LodCulling {
         } catch (Throwable t) {
             Initializer.LOGGER.error("[LodCulling] prepareCompact failed", t);
             return false;
-        } finally {
-            if (suspended) {
-                renderer.getMainPass().rebindMainTarget();
-            }
         }
     }
 
@@ -201,6 +190,7 @@ public final class LodCulling {
                                      int outCmdBaseUint, int countIndexUint) {
         ByteBuffer push = stack.malloc(PUSH_SIZE);
         viewProj.get(0, push);
+
         push.putInt(64, drawCount);
         push.putInt(68, flags);
         push.putInt(72, HiZPyramid.getMipCount());
@@ -213,6 +203,7 @@ public final class LodCulling {
         push.putFloat(100, HiZPyramid.getHeight());
         push.putFloat(104, DEPTH_BIAS);
         push.putFloat(108, 0.0f);
+
         cullPipeline.pushConstants(commandBuffer, push);
     }
 

@@ -37,6 +37,10 @@ public class SectionGraph {
     private final ResettableQueue<RenderSection> blockEntitiesSections = new ResettableQueue<>();
     private final ResettableQueue<RenderSection> rebuildQueue = new ResettableQueue<>();
 
+    // Statistics cache
+    private final StringBuilder statisticsBuilder = new StringBuilder(128);
+    private final List<String> statisticsList = new ArrayList<>(3);
+
     private VFrustum frustum;
 
     public RenderRegionBuilder renderRegionCache;
@@ -197,6 +201,7 @@ public class SectionGraph {
     }
 
     private void scheduleRebuilds() {
+        renderRegionCache.clearBatchCache();
         int maxScheduledRebuilds = AdaptiveChunkUploadBudget.chooseRebuildScheduleBudget(this.rebuildQueue.size());
         int scheduledRebuilds = 0;
 
@@ -323,36 +328,71 @@ public class SectionGraph {
     }
 
     public String getStatistics() {
+        StringBuilder sb = this.statisticsBuilder;
+        sb.setLength(0);
+
         int totalSections = this.sectionGrid.getSectionCount();
         int sections = this.sectionQueue.size();
         int renderDistance = WorldRenderer.getInstance().getRenderDistance();
-        String tasksInfo = this.taskDispatcher == null ? "null" : this.taskDispatcher.getStats();
 
-        String occlusionInfo = "";
-        if (Initializer.CONFIG.lodDepthSnapshot) {
-            int tested = DepthOcclusion.getTestedCount();
-            int culled = DepthOcclusion.getCulledCount();
-            occlusionInfo = String.format(", Occl-culled: %d/%d", culled, tested);
+        sb.append("Chunks: ")
+                .append(this.nonEmptyChunks)
+                .append('(')
+                .append(sections)
+                .append(")/")
+                .append(totalSections)
+                .append(" D: ")
+                .append(renderDistance)
+                .append(", ");
+
+        if (this.taskDispatcher == null) {
+            sb.append("null");
+        } else {
+            sb.append(this.taskDispatcher.getStats());
         }
 
-        return String.format("Chunks: %d(%d)/%d D: %d, %s%s", this.nonEmptyChunks, sections, totalSections, renderDistance, tasksInfo, occlusionInfo);
+        if (Initializer.CONFIG.lodDepthSnapshot) {
+            sb.append(", Occl-culled: ")
+                    .append(DepthOcclusion.getCulledCount())
+                    .append('/')
+                    .append(DepthOcclusion.getTestedCount());
+        }
+
+        return sb.toString();
     }
 
     public List<String> getStatisticsAsList() {
-        List<String> stats = new ArrayList<>();
+        List<String> stats = this.statisticsList;
+        stats.clear();
 
         int totalGridSections = this.sectionGrid.getSectionCount();
         int queuedSections = this.sectionQueue.size();
         int renderDistance = WorldRenderer.getInstance().getRenderDistance();
-        String tasksStats = (this.taskDispatcher != null) ? this.taskDispatcher.getStats() : "N/A";
 
-        stats.add("§7Rendered:§r §a" + this.nonEmptyChunks + "§r §7(Queue: §e" + queuedSections + "§7 / Total: §f" + totalGridSections + "§7)");
-        stats.add("§7Distance:§r §a" + renderDistance + " chunks§r | §7Tasks:§r §f" + tasksStats);
+        String tasksStats = this.taskDispatcher != null
+                ? this.taskDispatcher.getStats()
+                : "N/A";
+
+        stats.add(
+                "§7Rendered:§r §a" + this.nonEmptyChunks +
+                        "§r §7(Queue: §e" + queuedSections +
+                        "§7 / Total: §f" + totalGridSections +
+                        "§7)"
+        );
+
+        stats.add(
+                "§7Distance:§r §a" + renderDistance +
+                        " chunks§r | §7Tasks:§r §f" + tasksStats
+        );
 
         if (Initializer.CONFIG.lodDepthSnapshot) {
-            int tested = DepthOcclusion.getTestedCount();
-            int culled = DepthOcclusion.getCulledCount();
-            stats.add("§7Occlusion:§r §c" + culled + "§7/§f" + tested + " §7culled");
+            stats.add(
+                    "§7Occlusion:§r §c" +
+                            DepthOcclusion.getCulledCount() +
+                            "§7/§f" +
+                            DepthOcclusion.getTestedCount() +
+                            " §7culled"
+            );
         }
 
         return stats;

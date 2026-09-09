@@ -1,5 +1,7 @@
 package net.vulkanmod.vulkan.memory;
 
+import org.lwjgl.system.MemoryUtil;
+
 import java.nio.ByteBuffer;
 
 import static org.lwjgl.vulkan.VK10.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
@@ -29,5 +31,15 @@ public class StorageBuffer extends Buffer {
         int newSize = Math.max(minSize, this.bufferSize + (this.bufferSize >> 1));
         this.createBuffer(newSize);
         this.usedBytes = 0;
+    }
+
+    public void putInt(int offset, int value) {
+        if (!this.type.mappable())
+            throw new RuntimeException("Buffer is not mappable");
+
+        if (offset + Integer.BYTES > this.bufferSize)
+            throw new RuntimeException("Buffer overflow");
+
+        MemoryUtil.memPutInt(this.data.get(0) + offset, value);
     }
 }

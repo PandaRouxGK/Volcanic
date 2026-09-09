@@ -71,13 +71,13 @@ public final class PluginRegistry {
     }
 
     private static void bootstrap() {
-        if (bootstrapped) {
+        if (bootstrapped)
             return;
-        }
 
         bootstrapped = true;
 
         registerPlugin(new CorePipelinePlugin());
+        registerPlugin(new RadiancePipelinePlugin());
         PluginJarLoader.loadAll();
         setActiveShader("core");
     }

@@ -8,6 +8,9 @@ import net.minecraft.world.phys.Vec3;
 import net.vulkanmod.Initializer;
 import net.vulkanmod.compat.external.ExternalTerrainRenderBridge;
 import net.vulkanmod.gl.GlTexture;
+import net.vulkanmod.plugin.HookRegistry;
+import net.vulkanmod.plugin.hooks.annotations.ListenedEvent;
+import net.vulkanmod.plugin.hooks.events.render.frame.FrameBeginBeforeEvent;
 import net.vulkanmod.render.DepthSnapshot;
 import net.vulkanmod.render.HiZPyramid;
 import net.vulkanmod.render.chunk.WorldRenderer;
@@ -22,6 +25,7 @@ import net.vulkanmod.vulkan.device.DeviceManager;
 import net.vulkanmod.vulkan.memory.IndirectBuffer;
 import net.vulkanmod.vulkan.memory.MemoryManager;
 import net.vulkanmod.vulkan.memory.MemoryTypes;
+import net.vulkanmod.vulkan.memory.StorageBuffer;
 import net.vulkanmod.vulkan.shader.GraphicsPipeline;
 import net.vulkanmod.vulkan.shader.PipelineManager;
 import net.vulkanmod.vulkan.shader.PipelineState;
@@ -32,11 +36,14 @@ import org.joml.Matrix4f;
 import org.lwjgl.system.MemoryStack;
 import org.lwjgl.system.MemoryUtil;
 import org.lwjgl.vulkan.VK10;
+import org.lwjgl.vulkan.VK12;
 import org.lwjgl.vulkan.VkCommandBuffer;
 
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.FloatBuffer;
+import java.util.ArrayList;
+import java.util.List;
 
 public final class CalderaBridge {
 
@@ -46,6 +53,8 @@ public final class CalderaBridge {
     public static final int PASS_TEX_WATER = 3;
     public static final int PASS_FLAT_OPAQUE_SOLID = 4;
     public static final int PASS_TEX_OPAQUE_SOLID = 5;
+
+    private static final int NUM_PASSES = 6;
 
     private static final int INPUT_VERTEX_SIZE_BYTES = 16;
     private static final int INTERNAL_VERTEX_SIZE_BYTES = CustomVertexFormat.EXTERNAL_LOD.getVertexSize();
@@ -66,7 +75,11 @@ public final class CalderaBridge {
     private static final int ORIGIN_STRIDE_BYTES = 16;
     private static final int MAX_BATCH_CELLS = ORIGIN_SLOTS - 1;
     private static final int INDIRECT_COMMAND_BYTES = 20;
-    private static final int INDIRECT_BUFFER_BYTES = 262_144;
+
+    private static final int MAX_CHUNKS_PER_PASS = 8;
+    private static final int INDIRECT_CHUNK_BUFFER_BYTES = MAX_BATCH_CELLS * INDIRECT_COMMAND_BYTES;
+    private static final int INDIRECT_PASS_BUFFER_BYTES = INDIRECT_CHUNK_BUFFER_BYTES * MAX_CHUNKS_PER_PASS;
+    private static final int COUNT_PASS_BUFFER_BYTES = MAX_CHUNKS_PER_PASS * 4;
 
     private static final Matrix4f COMBINED_MATRIX_SCRATCH = new Matrix4f();
     private static final int LIGHTMAP_TEXTURE_SLOT = 0;
@@ -90,13 +103,19 @@ public final class CalderaBridge {
     static {
         MemoryUtil.memSet(CELL_ORIGINS.ptr, 0, ORIGIN_SLOTS * ORIGIN_STRIDE_BYTES);
         writeFogUniforms();
+
+        HookRegistry.register(new CalderaBridge());
     }
 
-    private static IndirectBuffer[] indirectBuffers;
-    private static int lastIndirectFrame = -1;
+    @ListenedEvent
+    public void onFrameBeginBefore(FrameBeginBeforeEvent event) {
+        beginLodCollection();
+    }
+
     private static boolean arenaUploadsPending;
 
     private static boolean indexBoundsWarned = false;
+    private static boolean chunkOverflowWarned = false;
 
     private static volatile float clipDistance = 0.0f;
 
@@ -112,18 +131,18 @@ public final class CalderaBridge {
     private static boolean pyramidReady;
 
     private static GraphicsPipeline batchPipeline;
-    private static boolean batchIndirect;
-    private static boolean batchCull;
-    private static int batchDrawCount;
-    private static int batchBoundArena = -1;
+
     private static boolean batchTexturesSaved;
     private static boolean batchAtlasSaved;
     private static boolean batchWaterStateSaved;
+
     private static VulkanImage batchPrevSlot0;
     private static VulkanImage batchPrevSlot3;
+
     private static boolean batchPrevDepthTest;
     private static boolean batchPrevDepthMask;
     private static boolean batchPrevBlendEnabled;
+
     private static int batchPrevSrcRgb;
     private static int batchPrevDstRgb;
     private static int batchPrevSrcAlpha;
@@ -131,9 +150,42 @@ public final class CalderaBridge {
     private static int batchPrevBlendOp;
     private static int batchPrevBlendOpRgb;
     private static int batchPrevBlendOpAlpha;
-    private static double batchCamX;
-    private static double batchCamY;
-    private static double batchCamZ;
+    private static int batchBoundArena = -1;
+
+    private record PendingCell(int handle, double originX, double originZ) {}
+
+    @SuppressWarnings("unchecked")
+    private static final List<PendingCell>[] PENDING_BY_PASS = new ArrayList[NUM_PASSES];
+    static {
+        for (int i = 0; i < NUM_PASSES; i++) {
+            PENDING_BY_PASS[i] = new ArrayList<>();
+        }
+    }
+
+    private static final class CulledChunk {
+        int arena = -1;
+        int cellsStart;
+        int cellCount;
+        long dstOffset;
+        long countOffset;
+    }
+
+    private static final class CulledPassData {
+        IndirectBuffer srcCommands;
+        IndirectBuffer dstCommands;
+        StorageBuffer countBuffer;
+
+        final List<CulledChunk> chunks = new ArrayList<>();
+        final List<PendingCell> cellsAtCullTime = new ArrayList<>();
+    }
+
+    private static CulledPassData[][] culledData; // [frame][pass]
+    private static int lastCulledFrame = -1;
+
+    private static double frameCamX;
+    private static double frameCamY;
+    private static double frameCamZ;
+    private static boolean frameCullEnabled;
 
     private CalderaBridge() {
     }
@@ -169,7 +221,6 @@ public final class CalderaBridge {
         return FOG_PARAMS;
     }
 
-
     private static final int OCCLUSION_REFRESH_INTERVAL = 4;
     private static long occlusionFrameCounter;
     private static boolean occlusionRefreshFrame;
@@ -200,6 +251,7 @@ public final class CalderaBridge {
                 && Initializer.CONFIG.indirectDraw
                 && DeviceManager.supportsFastIndirectDraw()
                 && LodCulling.isAvailable();
+
         if (!snapshotWanted && !cullWanted) {
             pyramidReady = false;
             return;
@@ -281,10 +333,13 @@ public final class CalderaBridge {
         if (arena == null) {
             boolean textured = pass == PASS_TEX_OPAQUE || pass == PASS_TEX_WATER;
             boolean water = pass == PASS_FLAT_WATER || pass == PASS_TEX_WATER;
+
             int vertexSize = textured ? INTERNAL_TEXTURED_VERTEX_SIZE_BYTES : INTERNAL_VERTEX_SIZE_BYTES;
             int vertexBytes = water ? WATER_ARENA_VERTEX_BYTES : OPAQUE_ARENA_VERTEX_BYTES;
             int indexBytes = water ? WATER_ARENA_INDEX_BYTES : OPAQUE_ARENA_INDEX_BYTES;
+
             arena = new LodArena(vertexSize, vertexBytes, indexBytes);
+
             ARENAS[pass] = arena;
         }
         return arena;
@@ -321,10 +376,11 @@ public final class CalderaBridge {
 
     public static void setSurfaceIndexCount(int handle, int surfaceIndexCount) {
         MeshHandle mesh = HANDLES.get(handle);
-        if (mesh == null) {
+        if (mesh == null)
             return;
-        }
+
         int clamped = Math.max(0, Math.min(surfaceIndexCount, mesh.indexCount()));
+
         HANDLES.put(handle, new MeshHandle(mesh.arena(), mesh.indexCount(), mesh.firstIndex(), mesh.vertexOffset(),
                 mesh.minX(), mesh.minY(), mesh.minZ(), mesh.maxX(), mesh.maxY(), mesh.maxZ(), clamped,
                 Math.min(mesh.surfaceNonDownIndexCount(), clamped), mesh.maxDownY()));
@@ -332,9 +388,9 @@ public final class CalderaBridge {
 
     public static void setLodIndexRanges(int handle, int surfaceNonDownIndexCount, int maxDownY) {
         MeshHandle mesh = HANDLES.get(handle);
-        if (mesh == null) {
+        if (mesh == null)
             return;
-        }
+
         int clamped = Math.max(0, Math.min(surfaceNonDownIndexCount, mesh.surfaceIndexCount()));
         HANDLES.put(handle, new MeshHandle(mesh.arena(), mesh.indexCount(), mesh.firstIndex(), mesh.vertexOffset(),
                 mesh.minX(), mesh.minY(), mesh.minZ(), mesh.maxX(), mesh.maxY(), mesh.maxZ(),
@@ -424,24 +480,213 @@ public final class CalderaBridge {
         }
     }
 
+    public static void beginLodCollection() {
+        for (List<PendingCell> list : PENDING_BY_PASS) {
+            list.clear();
+        }
+    }
+
+    public static void collectLodCell(int pass, int handle, double cellOriginX, double cellOriginZ) {
+        if (pass < 0 || pass >= NUM_PASSES || !HANDLES.containsKey(handle))
+            return;
+
+        PENDING_BY_PASS[pass].add(new PendingCell(handle, cellOriginX, cellOriginZ));
+    }
+
+    private static void prepareCulledFrame() {
+        int framesNum = Renderer.getFramesNum();
+
+        if (culledData == null || culledData.length != framesNum) {
+            culledData = new CulledPassData[framesNum][NUM_PASSES];
+
+            for (int f = 0; f < framesNum; f++) {
+                for (int p = 0; p < NUM_PASSES; p++) {
+                    CulledPassData d = new CulledPassData();
+
+                    d.srcCommands = new IndirectBuffer(INDIRECT_PASS_BUFFER_BYTES, MemoryTypes.HOST_MEM);
+                    d.dstCommands = new IndirectBuffer(INDIRECT_PASS_BUFFER_BYTES, MemoryTypes.HOST_MEM);
+                    d.countBuffer = new StorageBuffer(COUNT_PASS_BUFFER_BYTES, MemoryTypes.HOST_MEM);
+
+                    culledData[f][p] = d;
+                }
+            }
+
+            lastCulledFrame = -1;
+        }
+
+        int frame = Renderer.getCurrentFrame();
+
+        if (frame != lastCulledFrame) {
+            for (int p = 0; p < NUM_PASSES; p++) {
+                CulledPassData d = culledData[frame][p];
+
+                d.srcCommands.reset();
+                d.dstCommands.reset();
+                d.countBuffer.reset();
+                d.chunks.clear();
+                d.cellsAtCullTime.clear();
+            }
+
+            lastCulledFrame = frame;
+        }
+    }
+
+    public static void cullLodFrame(VkCommandBuffer commandBuffer) {
+        if (commandBuffer == null || !isReady()) {
+            return;
+        }
+
+        Renderer renderer = Renderer.getInstance();
+        if (renderer.getBoundRenderPass() != null) {
+            Initializer.LOGGER.error("[Caldera] bad caldera render call");
+            return;
+        }
+
+        if (arenaUploadsPending) {
+            UploadManager.INSTANCE.submitUploads();
+            arenaUploadsPending = false;
+        }
+
+        prepareCulledFrame();
+
+        Vec3 liveCam = WorldRenderer.getCameraPos();
+        frameCamX = liveCam != null ? liveCam.x() : 0.0;
+        frameCamY = liveCam != null ? liveCam.y() : 0.0;
+        frameCamZ = liveCam != null ? liveCam.z() : 0.0;
+
+        frameCullEnabled = Initializer.CONFIG.lodGpuCulling
+                && Initializer.CONFIG.indirectDraw
+                && DeviceManager.supportsFastIndirectDraw()
+                && LodCulling.isAvailable();
+
+        if (frameCullEnabled) {
+            FloatBuffer mvpSrc = VRenderSystem.getExternalLodMVP().buffer.asFloatBuffer();
+            mvpSrc.position(0);
+            CULL_MATRIX_SCRATCH.set(mvpSrc);
+        }
+
+        int frame = Renderer.getCurrentFrame();
+        for (int pass = 0; pass < NUM_PASSES; pass++) {
+            cullPass(commandBuffer, pass, culledData[frame][pass]);
+        }
+    }
+
+    private static void cullPass(VkCommandBuffer commandBuffer, int pass, CulledPassData data) {
+        List<PendingCell> pending = PENDING_BY_PASS[pass];
+        if (pending.isEmpty()) {
+            return;
+        }
+
+        int totalCells = pending.size();
+        int numChunks = (totalCells + MAX_BATCH_CELLS - 1) / MAX_BATCH_CELLS;
+        if (numChunks > MAX_CHUNKS_PER_PASS) {
+            if (!chunkOverflowWarned) {
+                chunkOverflowWarned = true;
+                Initializer.LOGGER.error("[Caldera] pass {} has {} visible LOD cells, exceeding the "
+                                + "MAX_CHUNKS_PER_PASS * MAX_BATCH_CELLS budget ({}). Extra cells are dropped "
+                                + "this frame; raise MAX_CHUNKS_PER_PASS if this happens routinely.",
+                        pass, totalCells, MAX_CHUNKS_PER_PASS * MAX_BATCH_CELLS);
+            }
+            numChunks = MAX_CHUNKS_PER_PASS;
+        }
+
+        data.cellsAtCullTime.addAll(pending);
+
+        for (int chunkIndex = 0; chunkIndex < numChunks; chunkIndex++) {
+            int start = chunkIndex * MAX_BATCH_CELLS;
+            int end = Math.min(start + MAX_BATCH_CELLS, totalCells);
+            int count = end - start;
+
+            if (count <= 0)
+                break;
+
+            int arena = HANDLES.get(pending.get(start).handle()).arena();
+
+            BATCH_COMMANDS.clear();
+            BATCH_AABBS.clear();
+
+            for (int i = 0; i < count; i++) {
+                PendingCell cell = pending.get(start + i);
+                MeshHandle mesh = HANDLES.get(cell.handle());
+
+                if (mesh == null)
+                    continue;
+
+                int drawIndexCount = drawCaves ? mesh.indexCount()
+                        : (frameCamY >= mesh.maxDownY() ? mesh.surfaceNonDownIndexCount() : mesh.surfaceIndexCount());
+
+                int slot = i + 1;
+
+                long cmdPtr = BATCH_COMMANDS_PTR + (long) i * INDIRECT_COMMAND_BYTES;
+
+                MemoryUtil.memPutInt(cmdPtr, drawIndexCount);
+                MemoryUtil.memPutInt(cmdPtr + 4, 1);
+                MemoryUtil.memPutInt(cmdPtr + 8, mesh.firstIndex());
+                MemoryUtil.memPutInt(cmdPtr + 12, mesh.vertexOffset());
+                MemoryUtil.memPutInt(cmdPtr + 16, slot);
+
+                float baseX = (float) (cell.originX() - frameCamX);
+                float baseZ = (float) (cell.originZ() - frameCamZ);
+
+                long aabbPtr = BATCH_AABBS_PTR + (long) i * LodCulling.AABB_STRIDE_BYTES;
+
+                MemoryUtil.memPutFloat(aabbPtr, baseX + mesh.minX());
+                MemoryUtil.memPutFloat(aabbPtr + 4, (float) (mesh.minY() - frameCamY));
+                MemoryUtil.memPutFloat(aabbPtr + 8, baseZ + mesh.minZ());
+                MemoryUtil.memPutFloat(aabbPtr + 12, 0.0f);
+                MemoryUtil.memPutFloat(aabbPtr + 16, baseX + mesh.maxX());
+                MemoryUtil.memPutFloat(aabbPtr + 20, (float) (mesh.maxY() - frameCamY));
+                MemoryUtil.memPutFloat(aabbPtr + 24, baseZ + mesh.maxZ());
+                MemoryUtil.memPutFloat(aabbPtr + 28, 0.0f);
+            }
+
+            BATCH_COMMANDS.position(0).limit(count * INDIRECT_COMMAND_BYTES);
+            long srcOffset = data.srcCommands.getOffset();
+            data.srcCommands.recordCopyCmd(BATCH_COMMANDS);
+            BATCH_COMMANDS.clear();
+
+            long dstOffset = data.dstCommands.getOffset();
+            data.dstCommands.recordCopyCmd(BATCH_COMMANDS); // reserves/advances the same span; content overwritten by cull or below
+            long countOffset = data.countBuffer.getOffset();
+
+            boolean culled = false;
+            if (frameCullEnabled) {
+                BATCH_AABBS.position(0).limit(count * LodCulling.AABB_STRIDE_BYTES);
+                long aabbOffset = LodCulling.uploadAabbs(BATCH_AABBS);
+                BATCH_AABBS.clear();
+
+                int flags = pyramidReady ? LodCulling.FLAG_OCCLUSION : 0;
+                culled = LodCulling.prepareCompact(commandBuffer, LodCulling.getAabbBuffer(), aabbOffset,
+                        data.srcCommands, srcOffset, data.dstCommands, dstOffset,
+                        data.countBuffer, countOffset, count, CULL_MATRIX_SCRATCH, flags);
+            }
+
+            if (!culled)
+                data.countBuffer.putInt((int) countOffset, count);
+
+            CulledChunk chunk = new CulledChunk();
+
+            chunk.arena = arena;
+            chunk.cellsStart = start;
+            chunk.cellCount = count;
+            chunk.dstOffset = dstOffset;
+            chunk.countOffset = countOffset;
+
+            data.chunks.add(chunk);
+        }
+    }
+
     public static boolean beginLodDraw(int pass) {
         try {
             return beginLodDrawInternal(pass);
         } catch (Throwable t) {
             Initializer.LOGGER.error("[Caldera] beginLodDraw failed", t);
+
             try {
                 endLodDrawInternal();
-            } catch (Throwable ignored) {
-            }
-            return false;
-        }
-    }
+            } catch (Throwable ignored) {}
 
-    public static void drawLodCell(int handle, double cellOriginX, double cellOriginZ) {
-        try {
-            drawLodCellInternal(handle, cellOriginX, cellOriginZ);
-        } catch (Throwable t) {
-            Initializer.LOGGER.error("[Caldera] drawLodCell failed", t);
+            return false;
         }
     }
 
@@ -454,15 +699,23 @@ public final class CalderaBridge {
     }
 
     private static boolean beginLodDrawInternal(int pass) {
-        if (batchPipeline != null || batchTexturesSaved || batchWaterStateSaved) {
-            batchDrawCount = 0;
+        if (batchPipeline != null || batchTexturesSaved || batchWaterStateSaved)
             endLodDrawInternal();
-        }
-        if (!isReady()) {
+
+        if (!isReady() || pass < 0 || pass >= NUM_PASSES)
             return false;
-        }
+
+        int frame = Renderer.getCurrentFrame();
+        if (culledData == null || frame != lastCulledFrame)
+            return false;
+
+        CulledPassData data = culledData[frame][pass];
+
+        if (data.chunks.isEmpty())
+            return false;
 
         PipelineManager pipelineManager = Renderer.getInstance().getPipelineManager();
+
         GraphicsPipeline pipeline = switch (pass) {
             case PASS_FLAT_OPAQUE -> pipelineManager.getPipeline(PipelineManager.PIPELINE_EXTERNAL_LOD);
             case PASS_TEX_OPAQUE -> pipelineManager.getPipeline(PipelineManager.PIPELINE_EXTERNAL_LOD_TEXTURED);
@@ -470,24 +723,15 @@ public final class CalderaBridge {
             case PASS_TEX_WATER -> pipelineManager.getPipeline(PipelineManager.PIPELINE_EXTERNAL_LOD_WATER_TEXTURED);
             case PASS_FLAT_OPAQUE_SOLID -> pipelineManager.getPipeline(PipelineManager.PIPELINE_EXTERNAL_LOD_SOLID);
             case PASS_TEX_OPAQUE_SOLID -> pipelineManager.getPipeline(PipelineManager.PIPELINE_EXTERNAL_LOD_TEXTURED_SOLID);
+
             default -> null;
         };
-        if (pipeline == null) {
+
+        if (pipeline == null)
             return false;
-        }
 
         boolean textured = pass == PASS_TEX_OPAQUE || pass == PASS_TEX_WATER || pass == PASS_TEX_OPAQUE_SOLID;
         boolean water = pass == PASS_FLAT_WATER || pass == PASS_TEX_WATER;
-
-        if (arenaUploadsPending) {
-            UploadManager.INSTANCE.submitUploads();
-            arenaUploadsPending = false;
-        }
-
-        Vec3 liveCam = WorldRenderer.getCameraPos();
-        batchCamX = liveCam != null ? liveCam.x() : 0.0;
-        batchCamY = liveCam != null ? liveCam.y() : 0.0;
-        batchCamZ = liveCam != null ? liveCam.z() : 0.0;
 
         writeSharedUniforms();
 
@@ -532,106 +776,46 @@ public final class CalderaBridge {
             return false;
         }
 
-        boolean indirect = Initializer.CONFIG.indirectDraw && DeviceManager.supportsFastIndirectDraw();
-        if (indirect) {
-            prepareIndirectFrame();
-            pushOrigin(pipeline, 0.0f, (float) (-batchCamY - Y_BIAS), 0.0f);
-            batchDrawCount = 0;
-            batchCull = Initializer.CONFIG.lodGpuCulling && LodCulling.isAvailable();
-        } else {
-            CELL_ORIGINS.buffer.limit(ORIGIN_STRIDE_BYTES);
-            renderer.uploadAndBindUBOs(pipeline);
-            CELL_ORIGINS.buffer.limit(ORIGIN_SLOTS * ORIGIN_STRIDE_BYTES);
-            batchCull = false;
-        }
-
-        batchIndirect = indirect;
         batchBoundArena = -1;
         batchPipeline = pipeline;
+
+        for (CulledChunk chunk : data.chunks)
+            drawChunk(pipeline, data, chunk);
+
         return true;
     }
 
-    private static void drawLodCellInternal(int handle, double cellOriginX, double cellOriginZ) {
-        GraphicsPipeline pipeline = batchPipeline;
-        if (pipeline == null) {
-            return;
-        }
+    private static void drawChunk(GraphicsPipeline pipeline, CulledPassData data, CulledChunk chunk) {
+        if (chunk.arena != batchBoundArena) {
+            LodArena arena = ARENAS[chunk.arena];
 
-        MeshHandle mesh = HANDLES.get(handle);
-        if (mesh == null) {
-            return;
-        }
+            if (arena == null)
+                return;
 
-        int drawIndexCount = drawCaves ? mesh.indexCount()
-                : (batchCamY >= mesh.maxDownY() ? mesh.surfaceNonDownIndexCount() : mesh.surfaceIndexCount());
-        if (drawIndexCount <= 0) {
-            return;
-        }
-
-        LodArena arena = ARENAS[mesh.arena()];
-        if (arena == null) {
-            return;
-        }
-
-        if (batchIndirect) {
-            if (mesh.arena() != batchBoundArena) {
-                flushBatch();
-                bindArena(arena);
-                batchBoundArena = mesh.arena();
-            } else if (batchDrawCount == MAX_BATCH_CELLS) {
-                flushBatch();
-            }
-
-            int slot = batchDrawCount + 1;
-            int originOffset = slot * ORIGIN_STRIDE_BYTES;
-            CELL_ORIGINS.putFloat(originOffset, (float) (cellOriginX - batchCamX));
-            CELL_ORIGINS.putFloat(originOffset + 4, 0.0f);
-            CELL_ORIGINS.putFloat(originOffset + 8, (float) (cellOriginZ - batchCamZ));
-            CELL_ORIGINS.putFloat(originOffset + 12, 0.0f);
-
-            long ptr = BATCH_COMMANDS_PTR + (long) batchDrawCount * INDIRECT_COMMAND_BYTES;
-            MemoryUtil.memPutInt(ptr, drawIndexCount);
-            MemoryUtil.memPutInt(ptr + 4, 1);
-            MemoryUtil.memPutInt(ptr + 8, mesh.firstIndex());
-            MemoryUtil.memPutInt(ptr + 12, mesh.vertexOffset());
-            MemoryUtil.memPutInt(ptr + 16, slot);
-
-            if (batchCull) {
-                long aabbPtr = BATCH_AABBS_PTR + (long) batchDrawCount * LodCulling.AABB_STRIDE_BYTES;
-                float baseX = (float) (cellOriginX - batchCamX);
-                float baseZ = (float) (cellOriginZ - batchCamZ);
-                MemoryUtil.memPutFloat(aabbPtr, baseX + mesh.minX());
-                MemoryUtil.memPutFloat(aabbPtr + 4, (float) (mesh.minY() - batchCamY));
-                MemoryUtil.memPutFloat(aabbPtr + 8, baseZ + mesh.minZ());
-                MemoryUtil.memPutFloat(aabbPtr + 12, 0.0f);
-                MemoryUtil.memPutFloat(aabbPtr + 16, baseX + mesh.maxX());
-                MemoryUtil.memPutFloat(aabbPtr + 20, (float) (mesh.maxY() - batchCamY));
-                MemoryUtil.memPutFloat(aabbPtr + 24, baseZ + mesh.maxZ());
-                MemoryUtil.memPutFloat(aabbPtr + 28, 0.0f);
-            }
-
-            batchDrawCount++;
-            return;
-        }
-
-        if (mesh.arena() != batchBoundArena) {
             bindArena(arena);
-            batchBoundArena = mesh.arena();
+            batchBoundArena = chunk.arena;
         }
 
-        pushOrigin(pipeline, (float) (cellOriginX - batchCamX), (float) (-batchCamY - Y_BIAS), (float) (cellOriginZ - batchCamZ));
-        VK10.vkCmdDrawIndexed(Renderer.getCommandBuffer(), drawIndexCount, 1, mesh.firstIndex(), mesh.vertexOffset(), 0);
-    }
+        for (int i = 0; i < chunk.cellCount; i++) {
+            PendingCell cell = data.cellsAtCullTime.get(chunk.cellsStart + i);
 
-    private static void pushOrigin(GraphicsPipeline pipeline, float x, float y, float z) {
-        try (MemoryStack stack = MemoryStack.stackPush()) {
-            ByteBuffer pushData = stack.malloc(16);
-            pushData.putFloat(0, x);
-            pushData.putFloat(4, y);
-            pushData.putFloat(8, z);
-            pushData.putFloat(12, 0.0f);
-            VK10.vkCmdPushConstants(Renderer.getCommandBuffer(), pipeline.getLayout(), VK10.VK_SHADER_STAGE_VERTEX_BIT, 0, pushData);
+            int slot = i + 1;
+            int originOffset = slot * ORIGIN_STRIDE_BYTES;
+
+            CELL_ORIGINS.putFloat(originOffset, (float) (cell.originX() - frameCamX));
+            CELL_ORIGINS.putFloat(originOffset + 4, 0.0f);
+            CELL_ORIGINS.putFloat(originOffset + 8, (float) (cell.originZ() - frameCamZ));
+            CELL_ORIGINS.putFloat(originOffset + 12, 0.0f);
         }
+
+        CELL_ORIGINS.buffer.limit((chunk.cellCount + 1) * ORIGIN_STRIDE_BYTES);
+        Renderer.getInstance().uploadAndBindUBOs(pipeline);
+        CELL_ORIGINS.buffer.limit(ORIGIN_SLOTS * ORIGIN_STRIDE_BYTES);
+
+        VK12.vkCmdDrawIndexedIndirectCount(Renderer.getCommandBuffer(),
+                data.dstCommands.getId(), chunk.dstOffset,
+                data.countBuffer.getId(), chunk.countOffset,
+                chunk.cellCount, INDIRECT_COMMAND_BYTES);
     }
 
     private static void bindArena(LodArena arena) {
@@ -642,83 +826,7 @@ public final class CalderaBridge {
         VK10.vkCmdBindIndexBuffer(commandBuffer, arena.indexBuffer.getId(), 0, VK10.VK_INDEX_TYPE_UINT32);
     }
 
-    private static void prepareIndirectFrame() {
-        int framesNum = Renderer.getFramesNum();
-        if (indirectBuffers == null || indirectBuffers.length != framesNum) {
-            if (indirectBuffers != null) {
-                for (IndirectBuffer buffer : indirectBuffers) {
-                    buffer.freeBuffer();
-                }
-            }
-            indirectBuffers = new IndirectBuffer[framesNum];
-            for (int i = 0; i < framesNum; i++) {
-                indirectBuffers[i] = new IndirectBuffer(INDIRECT_BUFFER_BYTES, MemoryTypes.HOST_MEM);
-            }
-            lastIndirectFrame = -1;
-        }
-
-        int frame = Renderer.getCurrentFrame();
-        if (frame != lastIndirectFrame) {
-            indirectBuffers[frame].reset();
-            lastIndirectFrame = frame;
-        }
-    }
-
-    private static void flushBatch() {
-        if (batchDrawCount == 0) {
-            return;
-        }
-
-        CELL_ORIGINS.buffer.limit((batchDrawCount + 1) * ORIGIN_STRIDE_BYTES);
-        Renderer.getInstance().uploadAndBindUBOs(batchPipeline);
-        CELL_ORIGINS.buffer.limit(ORIGIN_SLOTS * ORIGIN_STRIDE_BYTES);
-
-        IndirectBuffer indirectBuffer = indirectBuffers[Renderer.getCurrentFrame()];
-        BATCH_COMMANDS.position(0);
-        BATCH_COMMANDS.limit(batchDrawCount * INDIRECT_COMMAND_BYTES);
-        indirectBuffer.recordCopyCmd(BATCH_COMMANDS);
-        BATCH_COMMANDS.clear();
-
-        long indirectOffset = indirectBuffer.getOffset();
-        if (dispatchCull(indirectBuffer, indirectOffset, batchDrawCount)) {
-            pushOrigin(batchPipeline, 0.0f, (float) (-batchCamY - Y_BIAS), 0.0f);
-        }
-
-        VK10.vkCmdDrawIndexedIndirect(Renderer.getCommandBuffer(), indirectBuffer.getId(), indirectOffset, batchDrawCount, INDIRECT_COMMAND_BYTES);
-        batchDrawCount = 0;
-    }
-
-    private static boolean dispatchCull(IndirectBuffer indirectBuffer, long indirectOffset, int drawCount) {
-        if (!batchCull) {
-            return false;
-        }
-
-        try {
-            BATCH_AABBS.position(0);
-            BATCH_AABBS.limit(drawCount * LodCulling.AABB_STRIDE_BYTES);
-            long aabbOffset = LodCulling.uploadAabbs(BATCH_AABBS);
-            BATCH_AABBS.clear();
-
-            FloatBuffer mvpSrc = VRenderSystem.getExternalLodMVP().buffer.asFloatBuffer();
-            mvpSrc.position(0);
-            CULL_MATRIX_SCRATCH.set(mvpSrc);
-
-            int flags = pyramidReady ? LodCulling.FLAG_OCCLUSION : 0;
-            return LodCulling.prepare(Renderer.getCommandBuffer(), LodCulling.getAabbBuffer(), aabbOffset,
-                    indirectBuffer, indirectOffset, drawCount, CULL_MATRIX_SCRATCH, flags);
-        } catch (Throwable t) {
-            batchCull = false;
-            Initializer.LOGGER.error("[Caldera] LOD cull dispatch failed", t);
-            return false;
-        }
-    }
-
     private static void endLodDrawInternal() {
-        if (batchIndirect) {
-            flushBatch();
-            batchIndirect = false;
-        }
-        batchCull = false;
         batchBoundArena = -1;
         batchPipeline = null;
         if (batchWaterStateSaved) {
@@ -852,14 +960,7 @@ public final class CalderaBridge {
     }
 
     private static void drawMeshInternal(int handle, double cellOriginX, double cellOriginZ) {
-        if (!beginLodDrawInternal(PASS_FLAT_OPAQUE)) {
-            return;
-        }
-        try {
-            drawLodCellInternal(handle, cellOriginX, cellOriginZ);
-        } finally {
-            endLodDrawInternal();
-        }
+        drawSingleMeshImmediate(PASS_FLAT_OPAQUE, handle, cellOriginX, cellOriginZ);
     }
 
     private static int uploadTexturedMeshInternal(ByteBuffer vertices, int vertexCount, ByteBuffer indices, int indexCount, boolean intIndices, int pass) {
@@ -971,35 +1072,138 @@ public final class CalderaBridge {
     }
 
     private static void drawTexturedMeshInternal(int handle, double cellOriginX, double cellOriginZ) {
-        if (!beginLodDrawInternal(PASS_TEX_OPAQUE)) {
-            return;
-        }
-        try {
-            drawLodCellInternal(handle, cellOriginX, cellOriginZ);
-        } finally {
-            endLodDrawInternal();
-        }
+        drawSingleMeshImmediate(PASS_TEX_OPAQUE, handle, cellOriginX, cellOriginZ);
     }
 
     private static void drawTexturedWaterMeshInternal(int handle, double cellOriginX, double cellOriginZ) {
-        if (!beginLodDrawInternal(PASS_TEX_WATER)) {
+        drawSingleMeshImmediate(PASS_TEX_WATER, handle, cellOriginX, cellOriginZ);
+    }
+
+    private static void drawWaterMeshInternal(int handle, double cellOriginX, double cellOriginZ) {
+        drawSingleMeshImmediate(PASS_FLAT_WATER, handle, cellOriginX, cellOriginZ);
+    }
+
+    private static void drawSingleMeshImmediate(int pass, int handle, double cellOriginX, double cellOriginZ) {
+        if (!beginSingleMeshDraw(pass)) {
             return;
         }
         try {
-            drawLodCellInternal(handle, cellOriginX, cellOriginZ);
+            MeshHandle mesh = HANDLES.get(handle);
+            if (mesh == null) {
+                return;
+            }
+            LodArena arena = ARENAS[mesh.arena()];
+            if (arena == null) {
+                return;
+            }
+
+            Vec3 liveCam = WorldRenderer.getCameraPos();
+            double camX = liveCam != null ? liveCam.x() : 0.0;
+            double camY = liveCam != null ? liveCam.y() : 0.0;
+            double camZ = liveCam != null ? liveCam.z() : 0.0;
+
+            int drawIndexCount = drawCaves ? mesh.indexCount()
+                    : (camY >= mesh.maxDownY() ? mesh.surfaceNonDownIndexCount() : mesh.surfaceIndexCount());
+            if (drawIndexCount <= 0) {
+                return;
+            }
+
+            bindArena(arena);
+            pushOrigin(batchPipeline, (float) (cellOriginX - camX), (float) (-camY - Y_BIAS), (float) (cellOriginZ - camZ));
+            VK10.vkCmdDrawIndexed(Renderer.getCommandBuffer(), drawIndexCount, 1, mesh.firstIndex(), mesh.vertexOffset(), 0);
         } finally {
             endLodDrawInternal();
         }
     }
 
-    private static void drawWaterMeshInternal(int handle, double cellOriginX, double cellOriginZ) {
-        if (!beginLodDrawInternal(PASS_FLAT_WATER)) {
-            return;
-        }
-        try {
-            drawLodCellInternal(handle, cellOriginX, cellOriginZ);
-        } finally {
+    private static boolean beginSingleMeshDraw(int pass) {
+        if (batchPipeline != null || batchTexturesSaved || batchWaterStateSaved) {
             endLodDrawInternal();
+        }
+        if (!isReady()) {
+            return false;
+        }
+
+        PipelineManager pipelineManager = Renderer.getInstance().getPipelineManager();
+        GraphicsPipeline pipeline = switch (pass) {
+            case PASS_FLAT_OPAQUE -> pipelineManager.getPipeline(PipelineManager.PIPELINE_EXTERNAL_LOD);
+            case PASS_TEX_OPAQUE -> pipelineManager.getPipeline(PipelineManager.PIPELINE_EXTERNAL_LOD_TEXTURED);
+            case PASS_FLAT_WATER -> pipelineManager.getPipeline(PipelineManager.PIPELINE_EXTERNAL_LOD_WATER);
+            case PASS_TEX_WATER -> pipelineManager.getPipeline(PipelineManager.PIPELINE_EXTERNAL_LOD_WATER_TEXTURED);
+            default -> null;
+        };
+        if (pipeline == null) {
+            return false;
+        }
+
+        boolean textured = pass == PASS_TEX_OPAQUE || pass == PASS_TEX_WATER;
+        boolean water = pass == PASS_FLAT_WATER || pass == PASS_TEX_WATER;
+
+        if (arenaUploadsPending) {
+            UploadManager.INSTANCE.submitUploads();
+            arenaUploadsPending = false;
+        }
+
+        writeSharedUniforms();
+
+        batchPrevSlot0 = VTextureSelector.getImage(LIGHTMAP_TEXTURE_SLOT);
+        batchPrevSlot3 = textured ? VTextureSelector.getImage(BLOCK_ATLAS_TEXTURE_SLOT) : null;
+        batchTexturesSaved = true;
+        batchAtlasSaved = textured;
+        bindLightmap();
+
+        if (textured && !bindAtlas()) {
+            endLodDrawInternal();
+            return false;
+        }
+
+        if (water) {
+            batchPrevDepthTest = VRenderSystem.depthTest;
+            batchPrevDepthMask = VRenderSystem.depthMask;
+            PipelineState.BlendInfo bi = PipelineState.blendInfo;
+            batchPrevBlendEnabled = bi.enabled;
+            batchPrevSrcRgb = bi.srcRgbFactor;
+            batchPrevDstRgb = bi.dstRgbFactor;
+            batchPrevSrcAlpha = bi.srcAlphaFactor;
+            batchPrevDstAlpha = bi.dstAlphaFactor;
+            batchPrevBlendOp = bi.blendOp;
+            batchPrevBlendOpRgb = bi.blendOpRgb;
+            batchPrevBlendOpAlpha = bi.blendOpAlpha;
+            batchWaterStateSaved = true;
+
+            VRenderSystem.depthTest = true;
+            VRenderSystem.depthMask = false;
+            bi.enabled = true;
+            bi.srcRgbFactor = VK10.VK_BLEND_FACTOR_SRC_ALPHA;
+            bi.dstRgbFactor = VK10.VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+            bi.srcAlphaFactor = VK10.VK_BLEND_FACTOR_ONE;
+            bi.dstAlphaFactor = VK10.VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+            bi.blendOp = bi.blendOpRgb = bi.blendOpAlpha = VK10.VK_BLEND_OP_ADD;
+        }
+
+        Renderer renderer = Renderer.getInstance();
+        if (!renderer.bindGraphicsPipeline(pipeline)) {
+            endLodDrawInternal();
+            return false;
+        }
+
+        CELL_ORIGINS.buffer.limit(ORIGIN_STRIDE_BYTES);
+        renderer.uploadAndBindUBOs(pipeline);
+        CELL_ORIGINS.buffer.limit(ORIGIN_SLOTS * ORIGIN_STRIDE_BYTES);
+
+        batchBoundArena = -1;
+        batchPipeline = pipeline;
+        return true;
+    }
+
+    private static void pushOrigin(GraphicsPipeline pipeline, float x, float y, float z) {
+        try (MemoryStack stack = MemoryStack.stackPush()) {
+            ByteBuffer pushData = stack.malloc(16);
+            pushData.putFloat(0, x);
+            pushData.putFloat(4, y);
+            pushData.putFloat(8, z);
+            pushData.putFloat(12, 0.0f);
+            VK10.vkCmdPushConstants(Renderer.getCommandBuffer(), pipeline.getLayout(), VK10.VK_SHADER_STAGE_VERTEX_BIT, 0, pushData);
         }
     }
 
