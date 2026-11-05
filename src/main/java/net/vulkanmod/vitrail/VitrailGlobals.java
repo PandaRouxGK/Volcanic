@@ -8,6 +8,8 @@ import net.minecraft.world.level.Level;
 import net.minecraft.world.phys.Vec3;
 import net.vulkanmod.vulkan.VRenderSystem;
 import net.vulkanmod.vulkan.pass.ShadowMap;
+import org.joml.Matrix3f;
+import org.joml.Matrix3fc;
 import org.joml.Matrix4f;
 import org.joml.Matrix4fc;
 import org.lwjgl.system.MemoryUtil;
@@ -77,6 +79,7 @@ final class VitrailGlobals {
      * transform, which lands it off screen and leaves the frame black whatever the pass sampled.
      */
     private static final Matrix4f IDENTITY = new Matrix4f();
+    private static final Matrix3f IDENTITY3 = new Matrix3f();
 
     private static int frameCounter;
     private static float frameTime;
@@ -250,6 +253,27 @@ final class VitrailGlobals {
                 case "viewHeight" -> put(slot, height);
                 case "texelSize" -> put(slot, 1.0F / Math.max(width, 1),
                         1.0F / Math.max(height, 1));
+
+                // The names a *geometry* stage places its vertices with, which are the pack's own
+                // spelling of the two matrices and not the gbuffer pair. Left at nought, the
+                // texture matrix alone is enough to ruin a frame: the terrain prologue multiplies
+                // its uv by this entry before sampling, so every texel of every block came out of
+                // the atlas at nought, and a world of grass and leaves was drawn uniformly white
+                // from the one colour that sits at the atlas' origin.
+                case "of_ModelViewMatrix" -> put(slot, this.fullscreen ? IDENTITY
+                        : this.sun ? shadowView() : modelView);
+                case "of_ProjectionMatrix" -> put(slot, this.fullscreen ? IDENTITY
+                        : this.sun ? shadowProjection() : projection);
+                // The inverse transpose of the view's rotation, which is how a normal survives a
+                // transform that has a scale in it. A terrain mesh of this engine carries no normal
+                // element at all and the prologue answers with its own, so this is for the packs
+                // that read it back rather than for the geometry drawn today.
+                case "of_NormalMatrix" -> put(slot, this.fullscreen ? IDENTITY3
+                        : this.sun ? normalMatrix(shadowView()) : normalMatrix(modelView));
+                // Eight identity matrices, which is what the game itself publishes for every unit
+                // but the one a draw scrolls. Unit nought maps a block's uv and unit one its light
+                // map, and a pack reads them rather than the raw attributes.
+                case "of_TextureMatrix" -> putIdentities(slot);
 
                 case "gbufferModelView" -> put(slot, modelView);
                 case "gbufferModelViewInverse" -> put(slot, inverseModelView);
@@ -451,6 +475,11 @@ final class VitrailGlobals {
         return matrix;
     }
 
+    /** The normal matrix of a view: the inverse transpose of its rotation. */
+    private static Matrix3fc normalMatrix(Matrix4fc modelView) {
+        return new Matrix3f().set(modelView).invert().transpose();
+    }
+
     private static Matrix4f modelView() {
         Matrix4f matrix = new Matrix4f();
         matrix.set(VRenderSystem.getModelViewMatrix().buffer.asFloatBuffer());
@@ -524,6 +553,19 @@ final class VitrailGlobals {
         // afterwards: every other write here is absolute.
         this.values.position(slot.offset());
         matrix.get(this.values);
+    }
+
+    private void put(Slot slot, Matrix3fc matrix) {
+        this.values.position(slot.offset());
+        matrix.get(this.values);
+    }
+
+    /** One identity per element of an array of matrices, at the stride the layout gave it. */
+    private void putIdentities(Slot slot) {
+        for (int i = 0; i < slot.count(); i++) {
+            this.values.position(slot.offset() + i * slot.stride());
+            IDENTITY.get(this.values);
+        }
     }
 
     private void putInt(Slot slot, int value) {

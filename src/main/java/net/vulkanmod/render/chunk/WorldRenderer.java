@@ -342,6 +342,11 @@ public class WorldRenderer {
         VRenderSystem.applyMVP(modelView, projection);
         VRenderSystem.setPrimitiveTopology(VertexFormat.Mode.TRIANGLES);
 
+        // The pack's block for this frame, when the pack is drawing the world: it is read out of the
+        // view and projection just applied, so it has to be written here rather than with the screen
+        // passes, which run after the frame's geometry. A no-op when the engine holds the world.
+        net.vulkanmod.vitrail.VitrailWorld.frame();
+
         Renderer renderer = Renderer.getInstance();
         RenderPipeline pipeline = pipelineManager.getPipeline(PipelineManager.ROLE_TERRAIN_MAIN, terrainRenderType);
         renderer.bindGraphicsPipeline(pipeline);

@@ -84,8 +84,16 @@ public final class VitrailChain {
      * ground darkens with distance from about six chunks and flickers with the pack's own temporal
      * noise. That is not Bliss and it is worse than not running them, so the flag stays off until
      * the world is drawn by the pack's own geometry programs.
+     * <p>
+     * Measured again once the geometry was: {@code -Dvitrail.chain.geometry=true} runs six passes and
+     * still presents an unlit frame, because the two that light it are refused — {@code deferred} and
+     * {@code deferred1} sample {@code dhDepthTex0}, {@code vxDepthTexOpaque} and the pack's own 3D
+     * light textures, none of which this chain answers for. So the flag changes which passes run and
+     * not whether the world is lit, and it stays off. The chain that does light the frame is the
+     * pack's own, drawn by {@link VitrailPackChain}.
      */
-    private static final boolean GEOMETRY = false;
+    private static final boolean GEOMETRY =
+            "true".equalsIgnoreCase(System.getProperty("vitrail.chain.geometry", "false"));
 
     /**
      * One geometry program is built and logged, to measure the attribute bridge.
@@ -108,7 +116,8 @@ public final class VitrailChain {
      * is here is the registration the routing will switch on, not a behaviour that can be enabled
      * on its own.
      */
-    private static final boolean DRAWS_WORLD = false;
+    private static final boolean DRAWS_WORLD =
+            !"false".equalsIgnoreCase(System.getProperty("vitrail.world.pack", "true"));
 
     private static boolean worldRoleInstalled;
 
@@ -344,37 +353,44 @@ public final class VitrailChain {
 
             PipelineManager manager = Renderer.getInstance().getPipelineManager();
             var engine = manager.terrainRole(PipelineManager.ROLE_TERRAIN_MAIN);
+            var engineFade = manager.terrainRole(PipelineManager.ROLE_TERRAIN_FADE);
 
-            // The same fallback tree the screen stages walk, and in the same order: this pack keeps
-            // its geometry family under dimensions/, so the dimension's own path finds nothing and
-            // the root answers. A single guessed name is what reported "no all_solid" for a pack
-            // that has one.
-            String[] candidates = {folder + "/all_solid", "all_solid", "dimensions/all_solid"};
-            VitrailProgram found = null;
+            // The pack's own geometry programs, compiled once against the mesh the engine draws.
+            // Loading them here rather than in the draw keeps the draw path free of compilation, and
+            // this is the one place that knows both the pack and the dimension's folder.
+            VitrailWorld world = VitrailWorld.installed(this.pack, folder);
 
-            for (String candidate : candidates) {
-                found = VitrailProgram.loadTerrain(this.pack, candidate);
+            if (world.drawable() && !world.targets().isEmpty()) {
+                // The role is wrapped, not replaced: the pack draws the opaque world and the engine
+                // keeps translucent, tripwire and the shadow roles, so a wrapper that forgot to
+                // delegate would leave those types with no pipeline to draw with at all.
+                //
+                // The fade role too, and with the same provider: a chunk fading in is the same
+                // geometry drawn with an alpha the pack's stage reads from its colour, and left with
+                // the engine's pipeline it would be the one caster in the world writing the engine's
+                // notion of the frame into the pack's albedo buffer.
+                java.util.function.Function<TerrainRenderType, net.vulkanmod.vulkan.shader.GraphicsPipeline> pack =
+                        type -> {
+                            var own = VitrailWorld.pipelineFor(type);
+                            return own != null ? own : engine != null ? engine.apply(type) : null;
+                        };
 
-                if (found != null && found.pipeline != null) {
-                    break;
-                }
-            }
+                java.util.function.Function<TerrainRenderType, net.vulkanmod.vulkan.shader.GraphicsPipeline> packFade =
+                        type -> {
+                            var own = VitrailWorld.pipelineFor(type);
+                            return own != null ? own : engineFade != null ? engineFade.apply(type) : null;
+                        };
 
-            VitrailProgram solid = found;
+                manager.registerTerrainRole(PipelineManager.ROLE_TERRAIN_MAIN, pack);
+                manager.registerTerrainRole(PipelineManager.ROLE_TERRAIN_FADE, packFade);
 
-            if (solid != null && solid.pipeline != null) {
-                // The role is wrapped, not replaced: the pack draws solids and the engine keeps
-                // cutout, translucent and the shadow roles, so a wrapper that forgot to delegate
-                // would leave those types with no pipeline to draw with at all.
-                manager.registerTerrainRole(PipelineManager.ROLE_TERRAIN_MAIN,
-                        type -> type == TerrainRenderType.SOLID ? solid.pipeline
-                                : (engine != null ? engine.apply(type) : null));
                 // The geometry pass writes the buffers its own directive names, so the framebuffer
                 // the world is drawn into is built from that list rather than from the first eight.
-                this.worldTargets = List.copyOf(solid.drawBuffers);
-                Initializer.LOGGER.info("Vitrail: '{}' now draws the world into {}", solid.name, this.worldTargets);
+                this.worldTargets = world.targets();
+                Initializer.LOGGER.info("Vitrail: '{}' now draws the world into {}", this.pack.getFileName(),
+                        this.worldTargets);
             } else {
-                Initializer.LOGGER.warn("Vitrail: the pack has no all_solid, the engine keeps the world");
+                Initializer.LOGGER.warn("Vitrail: the pack draws no opaque terrain, the engine keeps the world");
             }
         }
 

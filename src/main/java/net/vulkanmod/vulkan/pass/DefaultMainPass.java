@@ -544,8 +544,15 @@ public class DefaultMainPass implements MainPass {
         // before the main one opens, since the engine owns no pass of its own here yet.
         VitrailFacadeSmoke.tick(commandBuffer, stack);
 
-        VulkanImage colorAttachment = this.mainFramebuffer.getColorAttachment();
-        colorAttachment.transitionImageLayout(stack, commandBuffer, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+        // Every colour attachment, not only the first: when the pack draws the world, this
+        // framebuffer carries one attachment per buffer its geometry stage writes, and each of them
+        // was left readable by the chain at the end of the frame before. A pass begun with one of
+        // them still in the readable layout is the kind of mismatch the driver answers with a
+        // corrupted frame rather than an error.
+        for (int i = 0; i < this.mainFramebuffer.getColorAttachmentCount(); i++) {
+            this.mainFramebuffer.getColorAttachment(i)
+                    .transitionImageLayout(stack, commandBuffer, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+        }
 
         this.mainFramebuffer.beginRenderPass(commandBuffer, this.mainRenderPass, stack);
 

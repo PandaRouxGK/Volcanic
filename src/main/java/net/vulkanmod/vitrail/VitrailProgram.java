@@ -328,6 +328,16 @@ final class VitrailProgram {
         return decls;
     }
 
+    /**
+     * The selector slot the engine fills for a terrain sampler of this name.
+     * <p>
+     * Read out of the same table {@code loadTerrain} uses, so a geometry stage built by another
+     * caller lands in the slot the chunk draw really binds rather than in a second guess of it.
+     */
+    static int terrainSlot(String name) {
+        return Layout.engineSlot(name);
+    }
+
     /** The blocks of two prepared stages, with the stage bits each is read from. */
     static List<BlockDecl> blockDecls(String vertex, String fragment) {
         Layout layout = new Layout();
