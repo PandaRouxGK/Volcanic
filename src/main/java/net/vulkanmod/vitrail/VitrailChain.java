@@ -1022,6 +1022,14 @@ public final class VitrailChain {
      * shadows at, at the cost of the resolution the nearer ones would have given.
      */
     private static VulkanImage shadowDepth() {
+        // The switch the world's own stage answers to, honoured here as well: an A/B of the shadow
+        // term has to move the map for both of its readers, or it moves the one it changed and
+        // measures the other. Answering nothing lets the stand-in table put the white texel here,
+        // which is the same "no occluder anywhere" the other arm is built on.
+        if ("white".equals(System.getProperty("vitrail.shadow.map"))) {
+            return null;
+        }
+
         ShadowMap map = ShadowMap.active();
 
         if (map == null || !map.isReady() || !Initializer.CONFIG.shadowsEnabled) {

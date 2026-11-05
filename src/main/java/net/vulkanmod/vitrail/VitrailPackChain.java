@@ -159,14 +159,23 @@ public final class VitrailPackChain implements AutoCloseable {
     private ReadbackBuffer shadowProbe;
 
     /**
-     * The chain's first colour buffer read back beside the frame, which is where a shadow lands.
+     * Every colour buffer of the chain, read back beside the frame the same way.
      * <p>
      * The presented image is the pack's after its exposure and its tone map, so a mean over it moves
-     * when the adaptation moves and cannot say whether a shadow darkened a texel. The world's own
-     * buffer is what the terrain stage wrote, texel for texel, and the difference between two runs
-     * of it — one with the sun's map bound, one with the white texel — is the shadow term itself.
+     * when the adaptation moves and cannot say whether a shadow darkened a texel. The chain's own
+     * buffers are what its stages wrote, texel for texel — but which one holds a term is the pack's
+     * architecture, not a guess to make: a pack that lights in a deferred pass leaves its geometry
+     * stage writing an albedo, and a probe that reads only the first buffer measures the wrong
+     * thing and reads as a stable picture because it is reading half a texel of float. Every pool
+     * buffer is therefore read, and the one that answers the sun is found by comparing them.
      */
-    private ReadbackBuffer worldProbe;
+    private final Map<Integer, ReadbackBuffer> targetProbes = new LinkedHashMap<>();
+
+    /** The format each read back buffer was created in, so its texels can be decoded as they are. */
+    private final Map<Integer, GpuFormat> targetFormats = new LinkedHashMap<>();
+
+    /** Depth reads already said in the log, one per pass and name. */
+    private final Set<String> reportedDepths = new HashSet<>();
 
     /** The one chain this session draws, if it draws one. */
     private static VitrailPackChain drawn;
@@ -793,8 +802,15 @@ public final class VitrailPackChain implements AutoCloseable {
         VulkanImage shadow = shadowMap();
         int shadowBytes = shadow == null ? 0 : shadow.width * shadow.height * 4;
 
-        VulkanImage world = worldImage();
-        int worldBytes = world == null ? 0 : world.width * world.height * 4;
+        List<Map.Entry<Integer, GpuTexture>> buffers = new ArrayList<>();
+
+        for (Map.Entry<Integer, GpuTexture[]> entry : this.targets.entrySet()) {
+            GpuTexture texture = textureFor(entry.getKey(), TargetSchedule.Side.MAIN);
+
+            if (texture != null) {
+                buffers.add(Map.entry(entry.getKey(), texture));
+            }
+        }
 
         if (this.probe == null) {
             this.probe = new ReadbackBuffer(bytes);
@@ -802,7 +818,22 @@ public final class VitrailPackChain implements AutoCloseable {
                     ? new ReadbackBuffer(bytes)
                     : null;
             this.shadowProbe = shadowBytes > 0 ? new ReadbackBuffer(shadowBytes) : null;
-            this.worldProbe = worldBytes > 0 ? new ReadbackBuffer(worldBytes) : null;
+            for (Map.Entry<Integer, GpuTexture> buffer : buffers) {
+                VulkanImage target = buffer.getValue().image();
+                GpuFormat format = gpuFormatOf(target.format);
+
+                if (format == null) {
+                    Initializer.LOGGER.info(
+                            "Vitrail: pack chain probe leaves colortex{} unread, fmt=0x{} is none of "
+                                    + "the formats this engine can decode",
+                            buffer.getKey(), Integer.toHexString(target.format));
+                    continue;
+                }
+
+                this.targetFormats.put(buffer.getKey(), format);
+                this.targetProbes.put(buffer.getKey(),
+                        new ReadbackBuffer(target.width * target.height * format.bytesPerTexel));
+            }
         } else {
             // What was copied into these buffers on the frame before this one, now that it is there.
             // Read through a fresh mapping: the persistent one is cached memory and can be stale.
@@ -843,19 +874,37 @@ public final class VitrailPackChain implements AutoCloseable {
                 MemoryUtil.memFree(depths);
             }
 
-            if (this.worldProbe != null) {
-                ByteBuffer terrain = this.worldProbe.copyOut();
+            for (Map.Entry<Integer, GpuTexture> buffer : buffers) {
+                ReadbackBuffer read = this.targetProbes.get(buffer.getKey());
 
-                Initializer.LOGGER.info("Vitrail: pack chain probe, frame {} the world buffer {}x{}, {}, {}",
-                        this.framesDrawn - 1, world.width, world.height,
-                        stats(terrain, world.width * world.height),
-                        shade(terrain, world.width, world.height));
-
-                if (this.probeReports == 1) {
-                    writeImage(terrain, world.width, world.height, "vitrail-world.png");
+                if (read == null) {
+                    continue;
                 }
 
-                MemoryUtil.memFree(terrain);
+                VulkanImage target = buffer.getValue().image();
+                GpuFormat format = this.targetFormats.get(buffer.getKey());
+
+                if (format == null) {
+                    continue;
+                }
+
+                ByteBuffer values = read.copyOut();
+
+                Initializer.LOGGER.info("Vitrail: pack chain probe, frame {} colortex{} {}x{} {}, {}",
+                        this.framesDrawn - 1, buffer.getKey(), target.width, target.height,
+                        format.name(), bufferStats(values, target.width, target.height, format));
+
+                // The raw dump beside it, which is what another run is compared against: a bytes
+                // comparison needs no decode, and a decode that is wrong reads as a stable picture
+                // instead of as an error.
+                if (this.probeReports == 1) {
+                    writeRaw(values, target.width * target.height * format.bytesPerTexel,
+                            "vitrail-colortex" + buffer.getKey() + ".raw");
+                    writeBuffer(values, target.width, target.height, format,
+                            "vitrail-colortex" + buffer.getKey() + ".png");
+                }
+
+                MemoryUtil.memFree(values);
             }
 
             this.probeReports++;
@@ -875,10 +924,12 @@ public final class VitrailPackChain implements AutoCloseable {
                 this.shadowProbe = null;
             }
 
-            if (this.worldProbe != null) {
-                this.worldProbe.freeBuffer();
-                this.worldProbe = null;
+            for (ReadbackBuffer read : this.targetProbes.values()) {
+                read.freeBuffer();
             }
+
+            this.targetProbes.clear();
+            this.targetFormats.clear();
 
             return;
         }
@@ -904,24 +955,20 @@ public final class VitrailPackChain implements AutoCloseable {
             shadow.transitionImageLayout(stack, commandBuffer, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
         }
 
-        if (this.worldProbe != null) {
-            world.transitionImageLayout(stack, commandBuffer, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
-            ImageUtil.copyImageToBuffer(commandBuffer, this.worldProbe.getId(), world.getId(), 0,
-                    world.width, world.height, 0, 0, 0, 0, 0);
-            world.transitionImageLayout(stack, commandBuffer, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-        }
-    }
+        for (Map.Entry<Integer, GpuTexture> buffer : buffers) {
+            ReadbackBuffer read = this.targetProbes.get(buffer.getKey());
 
-    /**
-     * The chain's first colour buffer, which is the one the world's geometry is drawn into.
-     * <p>
-     * Null when the pack's plan put nothing there, and read as eight bit RGBA: a pack that formats
-     * it otherwise would have its bytes read as if they were four channels, which is why the format
-     * is reported beside the numbers rather than assumed here.
-     */
-    private VulkanImage worldImage() {
-        GpuTexture texture = textureFor(0, TargetSchedule.Side.MAIN);
-        return texture == null ? null : texture.image();
+            if (read == null) {
+                continue;
+            }
+
+            VulkanImage target = buffer.getValue().image();
+            target.transitionImageLayout(stack, commandBuffer, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+            ImageUtil.copyImageToBuffer(commandBuffer, read.getId(), target.getId(), 0,
+                    target.width, target.height, 0, 0, 0, 0, 0);
+            target.transitionImageLayout(stack, commandBuffer,
+                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        }
     }
 
     /** The cascade the pack reads as {@code shadowtex0}, or null when the engine is drawing none. */
@@ -1074,6 +1121,226 @@ public final class VitrailPackChain implements AutoCloseable {
         return "mean=(" + sum[0] / texels + ", " + sum[1] / texels + ", " + sum[2] / texels
                 + ") min=(" + low[0] + ", " + low[1] + ", " + low[2]
                 + ") max=(" + high[0] + ", " + high[1] + ", " + high[2] + ")";
+    }
+
+    /**
+     * What one of the chain's own buffers holds, decoded in the format that buffer was created in.
+     * <p>
+     * A chain's buffers do not share a format: a pack declares eight bits for one, sixteen bit
+     * float for another and a packed eleven bit float for its scene, and this pool honours those
+     * declarations. Reading a texel as four bytes therefore reads whatever that buffer is not — on
+     * {@code RGBA16F} it reads half a texel and on {@code B10G11R11_UFLOAT_PACK32} it reads a
+     * packed word as four unrelated channels, and both of those come out as numbers that look like
+     * a picture and are blind to the sun. The values are linear and unclamped, so a lit surface at
+     * midday sits above one instead of at white; the percentiles are what say how far the ground's
+     * own luma moves between two runs, which is what a shadow changes.
+     */
+    private static String bufferStats(ByteBuffer read, int width, int height, GpuFormat format) {
+        int texels = width * height;
+        int start = (height / 2) * width;
+        int counted = texels - start;
+        float[] channels = new float[3];
+        double[] sum = new double[3];
+        float[] low = {Float.MAX_VALUE, Float.MAX_VALUE, Float.MAX_VALUE};
+        float[] high = {-Float.MAX_VALUE, -Float.MAX_VALUE, -Float.MAX_VALUE};
+        float[] ground = new float[counted];
+
+        for (int texel = 0; texel < texels; texel++) {
+            channels(read, texel * format.bytesPerTexel, format, channels);
+
+            for (int channel = 0; channel < 3; channel++) {
+                float value = channels[channel];
+                sum[channel] += value;
+                low[channel] = Math.min(low[channel], value);
+                high[channel] = Math.max(high[channel], value);
+            }
+
+            if (texel >= start) {
+                ground[texel - start] = 0.2126F * channels[0] + 0.7152F * channels[1]
+                        + 0.0722F * channels[2];
+            }
+        }
+
+        java.util.Arrays.sort(ground);
+
+        return String.format(java.util.Locale.ROOT,
+                "mean=(%.4f, %.4f, %.4f) min=(%.4f, %.4f, %.4f) max=(%.2f, %.2f, %.2f)"
+                        + " lower half p2=%.4f p50=%.4f p98=%.4f",
+                sum[0] / texels, sum[1] / texels, sum[2] / texels,
+                low[0], low[1], low[2], high[0], high[1], high[2],
+                ground[(int) (counted * 0.02)], ground[counted / 2],
+                ground[Math.min(counted - 1, (int) (counted * 0.98))]);
+    }
+
+    /**
+     * What a buffer holds, said in the only terms a packed format can be read in: its own bytes.
+     * <p>
+     * Which bytes a pack's word puts a channel in is the pack's business and the driver's; which
+     * bytes changed between two runs is not. A shadow that darkens a region moves the top byte of
+     * the field it lives in, and a buffer whose bytes did not move at all did not receive the term
+     * whatever its format.
+     */
+    private static String rawStats(ByteBuffer read, int texels, int bytesPerTexel) {
+        long nonZero = 0;
+        long words = 0;
+
+        for (int texel = 0; texel < texels; texel++) {
+            boolean any = false;
+
+            for (int byteIndex = 0; byteIndex < bytesPerTexel; byteIndex++) {
+                if (read.get(texel * bytesPerTexel + byteIndex) != 0) {
+                    any = true;
+                }
+            }
+
+            if (any) {
+                nonZero++;
+            }
+
+            words++;
+        }
+
+        return String.format(java.util.Locale.ROOT,
+                "bytes %d per texel, %d/%d texels with a non-zero byte (%.1f%%)",
+                bytesPerTexel, nonZero, words, 100.0 * nonZero / words);
+    }
+
+    /** Writes a read back buffer's bytes beside the game, for another run to be compared against. */
+    private static void writeRaw(ByteBuffer read, int bytes, String fileName) {
+        try {
+            byte[] copy = new byte[bytes];
+            read.duplicate().get(0, copy);
+            java.nio.file.Files.write(java.nio.file.Path.of(fileName), copy);
+        } catch (java.io.IOException e) {
+            Initializer.LOGGER.error("Vitrail: {} could not be written", fileName, e);
+        }
+    }
+
+    /** One texel of a chain buffer, as the three colour channels it holds, in linear nought to one. */
+    private static void channels(ByteBuffer read, int at, GpuFormat format, float[] out) {
+        switch (format) {
+            case RGBA8 -> {
+                out[0] = unit(read.get(at));
+                out[1] = unit(read.get(at + 1));
+                out[2] = unit(read.get(at + 2));
+            }
+            case RGBA16 -> {
+                out[0] = unit16(read.getShort(at));
+                out[1] = unit16(read.getShort(at + 2));
+                out[2] = unit16(read.getShort(at + 4));
+            }
+            case RGBA16F -> {
+                out[0] = Float.float16ToFloat(read.getShort(at));
+                out[1] = Float.float16ToFloat(read.getShort(at + 2));
+                out[2] = Float.float16ToFloat(read.getShort(at + 4));
+            }
+            case RGBA32F -> {
+                out[0] = read.getFloat(at);
+                out[1] = read.getFloat(at + 4);
+                out[2] = read.getFloat(at + 8);
+            }
+            case RGB10A2 -> {
+                int packed = read.getInt(at);
+                out[0] = (packed & 0x3FF) / 1023.0F;
+                out[1] = ((packed >> 10) & 0x3FF) / 1023.0F;
+                out[2] = ((packed >> 20) & 0x3FF) / 1023.0F;
+            }
+            case RG11B10F -> {
+                // Measured off a dump and not off the name: red sits in the low eleven bits, green in
+                // the next eleven and blue in the top ten. Read the other way round — the order the
+                // Vulkan name suggests — the middle and low fields decode to tens of thousands,
+                // because a five bit exponent read one bit off is not a small error. The three
+                // channels come out as (0.24, 0.33, 0.53) on the reference frame, which is the sky
+                // of a hazy noon; the other order gives (0.53, 5561, 3049).
+                int packed = read.getInt(at);
+                out[0] = packed11(packed & 0x7FF);
+                out[1] = packed11((packed >> 11) & 0x7FF);
+                out[2] = packed10((packed >> 22) & 0x3FF);
+            }
+            case RG8 -> {
+                out[0] = unit(read.get(at));
+                out[1] = unit(read.get(at + 1));
+                out[2] = 0.0F;
+            }
+            case R8 -> out[0] = out[1] = out[2] = unit(read.get(at));
+            case RG16F -> {
+                out[0] = out[1] = out[2] = Float.float16ToFloat(read.getShort(at));
+            }
+            case R16F -> out[0] = out[1] = out[2] = Float.float16ToFloat(read.getShort(at));
+            case R32F -> out[0] = out[1] = out[2] = read.getFloat(at);
+        }
+    }
+
+    private static float unit(byte value) {
+        return (value & 0xFF) / 255.0F;
+    }
+
+    private static float unit16(short value) {
+        return (value & 0xFFFF) / 65535.0F;
+    }
+
+    /**
+     * One field of a packed float, which carries no sign bit: five exponent bits and a mantissa.
+     * <p>
+     * Read as a half float these decode to values in the tens of thousands, because the sign bit
+     * a half expects is the top bit of the next field along. The zero exponent is the denormal
+     * range, where the mantissa alone is the value.
+     */
+    private static float packed11(int bits) {
+        int exponent = (bits >> 6) & 0x1F;
+        int mantissa = bits & 0x3F;
+
+        return exponent == 0 ? mantissa / 64.0F * (1.0F / 16384.0F)
+                : (1.0F + mantissa / 64.0F) * (float) Math.pow(2.0, exponent - 15);
+    }
+
+    private static float packed10(int bits) {
+        int exponent = (bits >> 5) & 0x1F;
+        int mantissa = bits & 0x1F;
+
+        return exponent == 0 ? mantissa / 32.0F * (1.0F / 16384.0F)
+                : (1.0F + mantissa / 32.0F) * (float) Math.pow(2.0, exponent - 15);
+    }
+
+    /** The facade's name for a Vulkan format this engine can create, or null for one it cannot. */
+    private static GpuFormat gpuFormatOf(int vkFormat) {
+        for (GpuFormat format : GpuFormat.values()) {
+            if (format.vkFormat == vkFormat) {
+                return format;
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Writes a chain buffer as a PNG, clamped to the eight bit range it is readable in.
+     * <p>
+     * These buffers are linear and carry values above one, so this is a look at what a stage wrote
+     * and not a picture of the frame: what is bright saturates. The numbers beside it in the log are
+     * the measurement; the file is there to be looked at when a number reads wrong.
+     */
+    private static void writeBuffer(ByteBuffer read, int width, int height, GpuFormat format,
+                                    String fileName) {
+        ByteBuffer eight = MemoryUtil.memAlloc(width * height * 4);
+        float[] channels = new float[3];
+
+        try {
+            for (int texel = 0; texel < width * height; texel++) {
+                channels(read, texel * format.bytesPerTexel, format, channels);
+
+                for (int channel = 0; channel < 3; channel++) {
+                    eight.put(texel * 4 + channel, (byte) Math.max(0,
+                            Math.min(255, Math.round(channels[channel] * 255.0F))));
+                }
+
+                eight.put(texel * 4 + 3, (byte) 255);
+            }
+
+            writeImage(eight, width, height, fileName);
+        } finally {
+            MemoryUtil.memFree(eight);
+        }
     }
 
     /**
@@ -1248,6 +1515,19 @@ public final class VitrailPackChain implements AutoCloseable {
             } else {
                 this.boundWhite++;
                 this.whiteNames.add(stage.name() + ": " + binding.sampler());
+            }
+
+            // Which image a depth read is answered with, said once per pass: the plan's own unbound
+            // list is built with no engine resolver in hand, so it names a gap that the draw may
+            // already have closed, and a pass reading the far plane reconstructs positions from a
+            // depth of nought as surely as a pass reading nothing at all.
+            if ((binding.kind() == SamplerPlan.Kind.DEPTH
+                    || binding.kind() == SamplerPlan.Kind.CENTER_DEPTH)
+                    && this.reportedDepths.add(stage.name() + ":" + binding.sampler())) {
+                Initializer.LOGGER.info("Vitrail: pack chain depth, {} reads {} as {}",
+                        stage.name(), binding.sampler(), image == null ? "the white texel"
+                                : image.width + "x" + image.height + " fmt=0x"
+                                        + Integer.toHexString(image.format));
             }
 
             stage.pass().bind(slot, image != null ? image : VTextureSelector.getWhiteTexture());
