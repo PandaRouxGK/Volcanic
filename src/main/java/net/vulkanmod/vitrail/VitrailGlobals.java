@@ -12,6 +12,7 @@ import org.joml.Matrix3f;
 import org.joml.Matrix3fc;
 import org.joml.Matrix4f;
 import org.joml.Matrix4fc;
+import org.joml.Vector3f;
 import org.lwjgl.system.MemoryUtil;
 
 import java.nio.ByteBuffer;
@@ -183,6 +184,27 @@ final class VitrailGlobals {
         return globals;
     }
 
+    /**
+     * The names this block publishes for its program, in the order the pack declares them.
+     * <p>
+     * A value that reaches the block still has to be a name the stage declared, and a stage whose
+     * block is missing one is a stage a value can be written for and read by nobody. This is the
+     * list a probe reads when a shadow map is bound and compared and the picture does not move.
+     */
+    String names() {
+        StringBuilder names = new StringBuilder();
+
+        for (Slot slot : this.slots) {
+            if (names.length() > 0) {
+                names.append(' ');
+            }
+
+            names.append(slot.name());
+        }
+
+        return names.toString();
+    }
+
     long address() {
         return MemoryUtil.memAddress(this.buffer);
     }
@@ -225,9 +247,20 @@ final class VitrailGlobals {
 
         float partial = client.getTimer().getGameTimeDeltaPartialTick(false);
         long dayTime = level.getDayTime();
-        float sunAngle = (float) (((dayTime + partial) / 24000.0 - 0.25) * Math.PI * 2.0);
-        float sunX = (float) Math.cos(sunAngle);
-        float sunY = (float) Math.sin(sunAngle);
+        // The sun's direction, taken from the reading the engine's own shadow pass draws the map
+        // with rather than from a formula of this class's own.
+        float sunAngle = VRenderSystem.smoothTimeOfDay(client) * (float) (Math.PI * 2.0);
+        float sunX = -(float) Math.sin(sunAngle);
+        float sunHeight = (float) Math.cos(sunAngle);
+        float sunElevation = sunHeight * VRenderSystem.SUN_TILT_COS;
+
+        // Into the view's own space, which is where the pack reads a sun direction from: it maps
+        // the world into that space with `gbufferModelView` and takes the direction back out with
+        // the inverse of the same matrix. Published in the world's space instead, a pack is handed
+        // the sun a camera facing due north would see whatever way this one is facing, which on the
+        // reference pose is twelve degrees of yaw and on any other is whatever the player turned.
+        Vector3f sun = new Vector3f(sunX, sunElevation, sunHeight * VRenderSystem.SUN_TILT_SIN)
+                .mul(new Matrix3f(modelView));
 
         for (Slot slot : this.slots) {
             switch (slot.name()) {
@@ -235,6 +268,13 @@ final class VitrailGlobals {
                 case "frameTime" -> put(slot, frameTime);
                 case "frameTimeCounter" -> put(slot, frameTimeCounter);
                 case "worldTime" -> putInt(slot, (int) (dayTime % 24000L));
+                // The day as a fraction with the sun's own phase: nought at sunrise, a quarter at
+                // noon, a half at sunset, three quarters at midnight. A pack does not read it as an
+                // angle but as the time its own celestial path is built from — BSL takes
+                // `fract(timeAngle - 0.25)` and runs it through the sine and cosine of the sun's
+                // path — so leaving it at the block's nought hands that pack a sun on the eastern
+                // horizon at every hour of the day, whose light no surface faces.
+                case "timeAngle" -> put(slot, (float) ((dayTime % 24000L + partial) / 24000.0));
                 case "worldDay" -> putInt(slot, (int) (dayTime / 24000L));
                 case "moonPhase" -> putInt(slot, (int) ((dayTime / 24000L) % 8L));
 
@@ -317,14 +357,14 @@ final class VitrailGlobals {
                 case "shadowProjection" -> put(slot, shadowProjection());
                 case "shadowProjectionInverse" -> put(slot, new Matrix4f(shadowProjection()).invert());
 
-                case "sunPosition" -> put(slot, sunX * 100.0F, sunY * 100.0F, 0.0F);
-                case "shadowLightPosition" -> put(slot, sunX * 100.0F, sunY * 100.0F, 0.0F);
-                case "shadowLightPositionVector" -> put(slot, sunX, sunY, 0.0F);
+                case "sunPosition" -> put(slot, sun.x * 100.0F, sun.y * 100.0F, sun.z * 100.0F);
+                case "shadowLightPosition" -> put(slot, sun.x * 100.0F, sun.y * 100.0F, sun.z * 100.0F);
+                case "shadowLightPositionVector" -> put(slot, sun.x, sun.y, sun.z);
                 // The reach of the cascade a pack is handed, so a pack that reads its own distance
                 // from this rather than from its settings fades shadows out where they end.
                 case "shadowDistance" -> put(slot, ShadowMap.packRadius());
-                case "sunVec" -> put(slot, sunX, sunY, 0.0F);
-                case "sunElevation" -> put(slot, sunY);
+                case "sunVec" -> put(slot, sun.x, sun.y, sun.z);
+                case "sunElevation" -> put(slot, sunElevation);
                 case "rainStrength" -> put(slot, level.getRainLevel(partial));
                 case "isEyeInWater" -> putInt(slot, eyeInWater(client));
 
@@ -399,7 +439,7 @@ final class VitrailGlobals {
         return "members=" + this.slots.size() + " and no matrix among them";
     }
 
-    private static String row(Matrix4f matrix, int row) {
+    static String row(Matrix4f matrix, int row) {
         return String.format("%.4f %.4f %.4f %.4f / ",
                 row == 0 ? matrix.m00() : row == 1 ? matrix.m10() : row == 2 ? matrix.m20() : matrix.m30(),
                 row == 0 ? matrix.m01() : row == 1 ? matrix.m11() : row == 2 ? matrix.m21() : matrix.m31(),
@@ -420,6 +460,28 @@ final class VitrailGlobals {
      * {@code gbufferModelViewInverse}, which is camera relative, and projects it through this pair.
      * Draw and sample therefore speak one space, which is the condition for the two to agree.
      */
+    /**
+     * The sun's pair as this frame publishes it, so a probe can place a fragment itself.
+     * <p>
+     * A stage that returns before it samples leaves no number behind to say why: the map is full,
+     * the sampler compares, and the frame does not move. The pair is what such a stage decides with
+     * first, and this is the only place it can be read from outside the shader.
+     */
+    static String shadowReport() {
+        ShadowMap map = ShadowMap.active();
+
+        if (map == null || !map.isReady()) {
+            return "no active cascade";
+        }
+
+        Matrix4f view = shadowView();
+        Matrix4f projection = shadowProjection();
+
+        return "shadowModelView " + row(view, 0) + row(view, 1) + row(view, 2) + row(view, 3)
+                + "| shadowProjection " + row(projection, 0) + row(projection, 1) + row(projection, 2)
+                + row(projection, 3);
+    }
+
     private static Matrix4f shadowView() {
         ShadowMap map = ShadowMap.active();
 

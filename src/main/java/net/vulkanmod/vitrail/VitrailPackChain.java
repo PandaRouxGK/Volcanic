@@ -158,6 +158,16 @@ public final class VitrailPackChain implements AutoCloseable {
      */
     private ReadbackBuffer shadowProbe;
 
+    /**
+     * The chain's first colour buffer read back beside the frame, which is where a shadow lands.
+     * <p>
+     * The presented image is the pack's after its exposure and its tone map, so a mean over it moves
+     * when the adaptation moves and cannot say whether a shadow darkened a texel. The world's own
+     * buffer is what the terrain stage wrote, texel for texel, and the difference between two runs
+     * of it — one with the sun's map bound, one with the white texel — is the shadow term itself.
+     */
+    private ReadbackBuffer worldProbe;
+
     /** The one chain this session draws, if it draws one. */
     private static VitrailPackChain drawn;
     private static String drawnKey;
@@ -783,12 +793,16 @@ public final class VitrailPackChain implements AutoCloseable {
         VulkanImage shadow = shadowMap();
         int shadowBytes = shadow == null ? 0 : shadow.width * shadow.height * 4;
 
+        VulkanImage world = worldImage();
+        int worldBytes = world == null ? 0 : world.width * world.height * 4;
+
         if (this.probe == null) {
             this.probe = new ReadbackBuffer(bytes);
             this.sceneProbe = scene != null && scene.width == image.width && scene.height == image.height
                     ? new ReadbackBuffer(bytes)
                     : null;
             this.shadowProbe = shadowBytes > 0 ? new ReadbackBuffer(shadowBytes) : null;
+            this.worldProbe = worldBytes > 0 ? new ReadbackBuffer(worldBytes) : null;
         } else {
             // What was copied into these buffers on the frame before this one, now that it is there.
             // Read through a fresh mapping: the persistent one is cached memory and can be stale.
@@ -804,7 +818,7 @@ public final class VitrailPackChain implements AutoCloseable {
                     this.framesDrawn - 1, shade(presented, image.width, image.height));
 
             if (this.probeReports == 1) {
-                writeFrame(presented, image.width, image.height);
+                writeImage(presented, image.width, image.height, "vitrail-frame.png");
                 frameState();
             }
 
@@ -829,6 +843,21 @@ public final class VitrailPackChain implements AutoCloseable {
                 MemoryUtil.memFree(depths);
             }
 
+            if (this.worldProbe != null) {
+                ByteBuffer terrain = this.worldProbe.copyOut();
+
+                Initializer.LOGGER.info("Vitrail: pack chain probe, frame {} the world buffer {}x{}, {}, {}",
+                        this.framesDrawn - 1, world.width, world.height,
+                        stats(terrain, world.width * world.height),
+                        shade(terrain, world.width, world.height));
+
+                if (this.probeReports == 1) {
+                    writeImage(terrain, world.width, world.height, "vitrail-world.png");
+                }
+
+                MemoryUtil.memFree(terrain);
+            }
+
             this.probeReports++;
         }
 
@@ -844,6 +873,11 @@ public final class VitrailPackChain implements AutoCloseable {
             if (this.shadowProbe != null) {
                 this.shadowProbe.freeBuffer();
                 this.shadowProbe = null;
+            }
+
+            if (this.worldProbe != null) {
+                this.worldProbe.freeBuffer();
+                this.worldProbe = null;
             }
 
             return;
@@ -869,6 +903,25 @@ public final class VitrailPackChain implements AutoCloseable {
                     shadow.width, shadow.height, 0, 0, 0, 0, 0, VK_IMAGE_ASPECT_DEPTH_BIT);
             shadow.transitionImageLayout(stack, commandBuffer, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
         }
+
+        if (this.worldProbe != null) {
+            world.transitionImageLayout(stack, commandBuffer, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+            ImageUtil.copyImageToBuffer(commandBuffer, this.worldProbe.getId(), world.getId(), 0,
+                    world.width, world.height, 0, 0, 0, 0, 0);
+            world.transitionImageLayout(stack, commandBuffer, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        }
+    }
+
+    /**
+     * The chain's first colour buffer, which is the one the world's geometry is drawn into.
+     * <p>
+     * Null when the pack's plan put nothing there, and read as eight bit RGBA: a pack that formats
+     * it otherwise would have its bytes read as if they were four channels, which is why the format
+     * is reported beside the numbers rather than assumed here.
+     */
+    private VulkanImage worldImage() {
+        GpuTexture texture = textureFor(0, TargetSchedule.Side.MAIN);
+        return texture == null ? null : texture.image();
     }
 
     /** The cascade the pack reads as {@code shadowtex0}, or null when the engine is drawing none. */
@@ -1068,15 +1121,19 @@ public final class VitrailPackChain implements AutoCloseable {
     }
 
     /**
-     * Writes the frame this engine presents to {@code vitrail-frame.png}, beside the game.
+     * Writes a read back eight bit RGBA buffer as a PNG beside the game.
      * <p>
      * The numbers say whether the picture is an image; the file is what lets the other half of a
      * comparison be measured by the same program. A pack's frame and a reference renderer's
      * screenshot are then both eight bit RGBA PNGs read by one reader, instead of one of them being
      * a Vulkan readback and the other a PNG and the two disagreeing about channel order or rows in a
      * way that reads exactly like a shader fault.
+     * <p>
+     * Two files come out of a probe: {@code vitrail-frame.png} is what the screen shows, and
+     * {@code vitrail-world.png} is the chain's first colour buffer before the exposure a run's
+     * presented mean is subject to.
      */
-    private static void writeFrame(ByteBuffer read, int width, int height) {
+    private static void writeImage(ByteBuffer read, int width, int height, String fileName) {
         try {
             BufferedImage image = new BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB);
 
@@ -1090,7 +1147,7 @@ public final class VitrailPackChain implements AutoCloseable {
                 }
             }
 
-            Path file = Path.of("vitrail-frame.png").toAbsolutePath();
+            Path file = Path.of(fileName).toAbsolutePath();
             ImageIO.write(image, "png", file.toFile());
             Initializer.LOGGER.info("Vitrail: pack chain frame written to {}", file);
         } catch (IOException | RuntimeException exception) {

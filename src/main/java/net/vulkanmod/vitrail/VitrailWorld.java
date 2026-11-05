@@ -331,7 +331,20 @@ public final class VitrailWorld implements AutoCloseable {
         for (VitrailGlobals block : world.blocks) {
             block.write(Math.max(1, width), Math.max(1, height));
         }
+
+        if (!REPORTED_SHADOW_PAIR && VitrailDebug.ENABLED) {
+            REPORTED_SHADOW_PAIR = true;
+            Initializer.LOGGER.info("Vitrail: pack world shadow pair, {}", VitrailGlobals.shadowReport());
+
+            for (VitrailGlobals block : world.blocks) {
+                Initializer.LOGGER.info("Vitrail: pack world block, {} uniform(s) [{}]",
+                        block.size() / 4, block.names());
+            }
+        }
     }
+
+    /** Whether the pair the terrain stage decides its occlusion with has been said in the log. */
+    private static boolean REPORTED_SHADOW_PAIR;
 
     /**
      * Hands the sun's map to the slot a terrain stage samples its occlusion from.
@@ -353,8 +366,19 @@ public final class VitrailWorld implements AutoCloseable {
         VTextureSelector.bindTexture(VTextureSelector.SHADOW_SLOT, shadowDepth());
     }
 
-    /** The depth of the sun's map this frame, or the white texel when the engine draws none. */
+    /**
+     * The depth of the sun's map this frame, or the white texel when the engine draws none.
+     * <p>
+     * {@code -Dvitrail.shadow.map=white} answers the white texel even with a map in hand, which is
+     * the arm an A/B of the shadow term needs: the same frame, the same pose, the same sun, and the
+     * one difference being what the terrain's occlusion test reads. Anything else that moves between
+     * the two runs then belongs to the scene rather than to the term.
+     */
     private static VulkanImage shadowDepth() {
+        if ("white".equals(System.getProperty("vitrail.shadow.map"))) {
+            return VTextureSelector.getWhiteTexture();
+        }
+
         ShadowMap map = ShadowMap.active();
 
         if (map == null || !map.isReady() || !Initializer.CONFIG.shadowsEnabled) {
