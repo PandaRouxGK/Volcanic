@@ -579,8 +579,16 @@ public class WorldRenderer {
         IndexBuffer indexBuffer = Renderer.getDrawer().getQuadsIndexBuffer().getIndexBuffer();
         Renderer.getDrawer().bindIndexBuffer(Renderer.getCommandBuffer(), indexBuffer);
 
-        final TerrainRenderType[] types = {
-                TerrainRenderType.SOLID, TerrainRenderType.CUTOUT_MIPPED, TerrainRenderType.CUTOUT };
+        // The pack reads its occlusion out of the map a translucent surface also writes to: it
+        // samples shadowtex0 for the depth that blocks light, and keeps the opaque-only image apart
+        // as shadowtex1 for caustics. Leaving water out of this cascade would light the bottom of
+        // every lake. The engine's own map keeps drawing the opaque types alone, since nothing of
+        // its own reads a second image.
+        final TerrainRenderType[] types = cascade == net.vulkanmod.vulkan.pass.ShadowMap.PACK_CASCADE
+                ? new TerrainRenderType[] { TerrainRenderType.SOLID, TerrainRenderType.CUTOUT_MIPPED,
+                        TerrainRenderType.CUTOUT, TerrainRenderType.TRANSLUCENT }
+                : new TerrainRenderType[] { TerrainRenderType.SOLID, TerrainRenderType.CUTOUT_MIPPED,
+                        TerrainRenderType.CUTOUT };
 
         final boolean indirectDraw = Initializer.CONFIG.indirectDraw && DeviceManager.supportsFastIndirectDraw();
         IndirectBuffer shadowIndirect = indirectDraw ? this.shadowIndirectBuffers[cascade][Renderer.getCurrentFrame()] : null;

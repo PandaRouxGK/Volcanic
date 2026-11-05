@@ -363,8 +363,11 @@ public final class VitrailShadow implements AutoCloseable {
             return null;
         }
 
+        // A pack's shadow stage spends the same code on water as on stone: it projects, distorts and
+        // writes. Serving the translucent type from the engine's stage instead would leave water in
+        // this image placed by an undistorted pair, in a texel no composite pass ever asks for.
         GpuPipeline pipeline = switch (type) {
-            case SOLID -> shadow.solid;
+            case SOLID, TRANSLUCENT -> shadow.solid;
             case CUTOUT, CUTOUT_MIPPED -> shadow.cutout;
             default -> null;
         };
