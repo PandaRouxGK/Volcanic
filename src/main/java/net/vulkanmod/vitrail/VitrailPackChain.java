@@ -800,6 +800,9 @@ public final class VitrailPackChain implements AutoCloseable {
                     Integer.toHexString(shown.format().vkFormat), bufferName(shown),
                     stats(presented, image.width * image.height));
 
+            Initializer.LOGGER.info("Vitrail: pack chain probe, frame {} ground {}",
+                    this.framesDrawn - 1, shade(presented, image.width, image.height));
+
             if (this.probeReports == 1) {
                 writeFrame(presented, image.width, image.height);
                 frameState();
@@ -948,6 +951,59 @@ public final class VitrailPackChain implements AutoCloseable {
     }
 
     /** Mean, low and high of an eight bit RGBA readback, which is what says the picture is an image. */
+    /**
+     * How dark the ground half of a frame is, as luminance percentiles.
+     * <p>
+     * A mean cannot say whether a shadow is there: a picture with hard shadow in it and one lit by a
+     * lookup that measures the wrong thing both move a mean, and only one of them has ground that is
+     * dark in patches. Percentiles say it without a threshold to argue about — the second is the
+     * ground the sun does not reach, the median the field beside it — and the share under a quarter
+     * of white is that same split as one number, which is what an A/B of the shadow map's sampler
+     * needs.
+     * <p>
+     * The lower half is the ground: the sky sits in the upper one and is brighter than anything lit,
+     * so a percentile over the whole frame would be a percentile of sky.
+     */
+    private static String shade(ByteBuffer read, int width, int height) {
+        int start = (height / 2) * width;
+        int texels = width * height - start;
+        int[] histogram = new int[256];
+
+        for (int texel = start; texel < width * height; texel++) {
+            int at = texel * 4;
+            int luminance = ((read.get(at) & 0xFF) * 77 + (read.get(at + 1) & 0xFF) * 150
+                    + (read.get(at + 2) & 0xFF) * 29) >> 8;
+            histogram[luminance]++;
+        }
+
+        long dark = 0;
+
+        for (int value = 0; value < 64; value++) {
+            dark += histogram[value];
+        }
+
+        return String.format(java.util.Locale.ROOT,
+                "lower half p2=%d p10=%d p50=%d, %d/%d (%.1f%%) under 64",
+                percentile(histogram, texels, 2), percentile(histogram, texels, 10),
+                percentile(histogram, texels, 50), dark, texels, 100.0 * dark / texels);
+    }
+
+    /** The luminance below which {@code percent} of the counted texels fall. */
+    private static int percentile(int[] histogram, int texels, int percent) {
+        long target = (long) texels * percent / 100;
+        long seen = 0;
+
+        for (int value = 0; value < histogram.length; value++) {
+            seen += histogram[value];
+
+            if (seen > target) {
+                return value;
+            }
+        }
+
+        return 255;
+    }
+
     private static String stats(ByteBuffer read, int texels) {
         long[] sum = new long[3];
         int[] low = {255, 255, 255};

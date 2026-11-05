@@ -13,8 +13,11 @@ import net.vulkanmod.render.vertex.TerrainRenderType;
 import net.vulkanmod.vitrail.gpu.GpuBuffer;
 import net.vulkanmod.vitrail.gpu.GpuDevice;
 import net.vulkanmod.vitrail.gpu.GpuPipeline;
+import net.vulkanmod.vulkan.pass.ShadowMap;
 import net.vulkanmod.vulkan.shader.GraphicsPipeline;
 import net.vulkanmod.vulkan.shader.layout.PushConstants;
+import net.vulkanmod.vulkan.texture.VTextureSelector;
+import net.vulkanmod.vulkan.texture.VulkanImage;
 
 import java.io.IOException;
 import java.nio.file.Path;
@@ -328,6 +331,37 @@ public final class VitrailWorld implements AutoCloseable {
         for (VitrailGlobals block : world.blocks) {
             block.write(Math.max(1, width), Math.max(1, height));
         }
+    }
+
+    /**
+     * Hands the sun's map to the slot a terrain stage samples its occlusion from.
+     * <p>
+     * The chunk draw fills three images by name, the atlas, the light map and the PBR atlas, and a
+     * pack's terrain stage reads a fourth: {@code shadowtex0}. That name was going to the last slot
+     * there is, which holds the white texel, so every occlusion test in the stage compared a
+     * reference against one — which answers lit — and a map forty per cent full left the ground
+     * exactly as bright as an empty one. It is bound here rather than in {@link #frame()} because
+     * the engine's own pass over those bindings runs between the two and answers every pack name it
+     * does not know with that same white texel; a binding written before it would be a binding
+     * overwritten.
+     */
+    public static void bindTextures() {
+        if (active == null || active.blocks.isEmpty()) {
+            return;
+        }
+
+        VTextureSelector.bindTexture(VTextureSelector.SHADOW_SLOT, shadowDepth());
+    }
+
+    /** The depth of the sun's map this frame, or the white texel when the engine draws none. */
+    private static VulkanImage shadowDepth() {
+        ShadowMap map = ShadowMap.active();
+
+        if (map == null || !map.isReady() || !Initializer.CONFIG.shadowsEnabled) {
+            return VTextureSelector.getWhiteTexture();
+        }
+
+        return map.getCascadeDepthImage(ShadowMap.PACK_CASCADE);
     }
 
     public List<Integer> targets() {

@@ -629,6 +629,11 @@ final class VitrailProgram {
                 case "gtexture", "texture", "tex" -> 0;
                 case "lightmap" -> 2;
                 case "normals", "specular" -> 4;
+                // The sun's map, which the chunk draw does not fill and which
+                // {@link VitrailWorld#frame()} binds before the world is drawn. Both names are the
+                // one cascade this engine hands a pack: shadowtex1 is the map without translucent
+                // casters, and water is drawn into the same map.
+                case "shadow", "shadowtex", "shadowtex0", "shadowtex1" -> VTextureSelector.SHADOW_SLOT;
                 default -> VTextureSelector.SIZE - 1;
             };
         }

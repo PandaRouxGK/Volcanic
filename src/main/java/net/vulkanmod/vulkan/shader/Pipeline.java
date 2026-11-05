@@ -20,6 +20,7 @@ import net.vulkanmod.vulkan.shader.descriptor.ManualUBO;
 import net.vulkanmod.vulkan.shader.descriptor.UBO;
 import net.vulkanmod.vulkan.shader.layout.AlignedStruct;
 import net.vulkanmod.vulkan.shader.layout.PushConstants;
+import net.vulkanmod.vulkan.texture.SamplerManager;
 import net.vulkanmod.vulkan.texture.VTextureSelector;
 import net.vulkanmod.vulkan.texture.VulkanImage;
 import org.apache.commons.lang3.Validate;
@@ -311,6 +312,7 @@ public abstract class Pipeline implements RenderPipeline {
         private boolean loggedNullView = false;
         private boolean loggedNullSet = false;
         private boolean loggedNullUBO = false;
+        private boolean loggedShadowSampler = false;
 
         DescriptorSets(Pipeline pipeline) {
             this.pipeline = pipeline;
@@ -380,7 +382,7 @@ public abstract class Pipeline implements RenderPipeline {
                     view = image.getImageView();
                 }
 
-                long sampler = image.getSampler();
+                long sampler = this.samplerFor(imageDescriptor, image);
 
                 if (imageDescriptor.isReadOnlyLayout)
                     image.readOnlyLayout();
@@ -483,7 +485,7 @@ public abstract class Pipeline implements RenderPipeline {
                     view = image.getImageView();
                 }
 
-                long sampler = image.getSampler();
+                long sampler = this.samplerFor(imageDescriptor, image);
                 int layout = imageDescriptor.getLayout();
 
                 if (imageDescriptor.isReadOnlyLayout)
@@ -511,6 +513,33 @@ public abstract class Pipeline implements RenderPipeline {
             }
 
             vkUpdateDescriptorSets(DEVICE, descriptorWrites, null);
+        }
+
+        /**
+         * The sampler a descriptor's declared type needs for the image it reads.
+         * <p>
+         * A {@code sampler2DShadow} read is a comparison the hardware is asked to make, and an
+         * ordinary sampler leaves {@code compareEnable} off: the fetch then hands back the depth it
+         * found, so every test a pack writes around it measures the wrong thing. Only a depth image
+         * gets the comparison — a colour image declared through a shadow sampler would be compared
+         * against a channel that means nothing — and the pair is logged once, because a binding that
+         * is chosen in a helper is a binding that is otherwise invisible in the log.
+         */
+        private long samplerFor(ImageDescriptor descriptor, VulkanImage image) {
+            if (!descriptor.isShadowSampler() || !VulkanImage.isDepthFormat(image.format)) {
+                return image.getSampler();
+            }
+
+            if (!this.loggedShadowSampler) {
+                this.loggedShadowSampler = true;
+                Initializer.LOGGER.info(
+                        "Shadows: program '{}' reads {} (binding {}, slot {}) through the depth comparison sampler, "
+                                + "on a {}x{} fmt=0x{}",
+                        this.pipeline.name, descriptor.name, descriptor.getBinding(), descriptor.imageIdx,
+                        image.width, image.height, Integer.toHexString(image.format));
+            }
+
+            return SamplerManager.getShadowSampler();
         }
 
         private void createDescriptorSets(MemoryStack stack) {

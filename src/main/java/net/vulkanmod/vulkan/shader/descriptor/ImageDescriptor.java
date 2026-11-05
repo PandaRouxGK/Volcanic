@@ -45,6 +45,23 @@ public class ImageDescriptor implements Descriptor {
         return descriptorType;
     }
 
+    /**
+     * Whether the declaration asks the hardware to compare instead of to fetch.
+     * <p>
+     * A pack writes {@code uniform sampler2DShadow shadowtex0} and samples it with
+     * {@code texture2DShadow}, which is a comparison of a reference depth against the map's. The
+     * declared type is the only place that request appears: the descriptor is a combined image
+     * sampler either way, and what differs is the sampler it is bound with.
+     * <p>
+     * {@code -Dvitrail.shadow.compare=false} turns the comparison off, which is the state this was
+     * measured from: a map full of casters and a frame with no shadow in it.
+     */
+    public boolean isShadowSampler() {
+        return COMPARISON_ENABLED && this.qualifier != null && this.qualifier.contains("Shadow");
+    }
+
+    private static final boolean COMPARISON_ENABLED = !"false".equals(System.getProperty("vitrail.shadow.compare"));
+
     @Override
     public int getStages() {
         return VK_SHADER_STAGE_ALL_GRAPHICS | VK_SHADER_STAGE_COMPUTE_BIT;

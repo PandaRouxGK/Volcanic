@@ -21,6 +21,17 @@ public abstract class VTextureSelector {
      */
     public static final int SIZE = 32;
 
+    /**
+     * The slot a pack's sun map is bound at.
+     * <p>
+     * A chunk draw fills the atlas, the light map and the PBR atlas by name, and a pack's terrain
+     * stage samples its occlusion from {@code shadowtex0} beside them. Left to the last slot — the
+     * white texel no engine code writes — every shadow test in that stage compared a reference
+     * against one, which answers lit, so forty per cent casters in the map left the ground exactly
+     * as bright as an empty one. Kept clear of the twelve the engine's own pipelines use.
+     */
+    public static final int SHADOW_SLOT = 8;
+
     private static final VulkanImage[] boundTextures = new VulkanImage[SIZE];
 
     private static final int[] levels = new int[SIZE];

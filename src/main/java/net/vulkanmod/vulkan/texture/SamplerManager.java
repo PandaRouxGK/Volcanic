@@ -21,6 +21,9 @@ public abstract class SamplerManager {
 
     static final Short2LongMap SAMPLERS = new Short2LongOpenHashMap();
 
+    /** The one comparison sampler, built on first use and never keyed by flags. */
+    private static long SHADOW_SAMPLER = 0L;
+
     public static long getTextureSampler(byte maxLod, byte flags) {
         short key = (short) (flags | (maxLod << 8));
         long sampler = SAMPLERS.getOrDefault(key, 0L);
@@ -98,9 +101,66 @@ public abstract class SamplerManager {
         }
     }
 
+    /**
+     * The sampler a depth map is read through when a shader declares a shadow sampler.
+     * <p>
+     * A pack declares {@code sampler2DShadow} and calls {@code texture2DShadow}, which is a request
+     * for the hardware to compare the reference it passes against the depth it fetches. Bound with
+     * one of the ordinary samplers above, compare disabled, the same call returns the depth it found
+     * instead of a comparison: a lit surface reads as occluded and an occluded one as lit, so a map
+     * forty per cent full produced a frame with no shadow at all. The comparison is against
+     * {@code LESS_OR_EQUAL}, which is what a shadow lookup means — a fragment is lit when it is no
+     * further from the sun than the nearest thing the map recorded — and the same operator every
+     * OpenGL pack is written against.
+     * <p>
+     * Outside the map the border reads as depth one, so the comparison answers lit rather than
+     * casting the map's edge across the world. Filtering stays nearest, matching the depth the
+     * engine writes to it, so the pack's own offset loop is what softens an edge.
+     */
+    public static long getShadowSampler() {
+        if (SHADOW_SAMPLER != 0L) {
+            return SHADOW_SAMPLER;
+        }
+
+        try (MemoryStack stack = stackPush()) {
+            VkSamplerCreateInfo samplerInfo = VkSamplerCreateInfo.calloc(stack);
+            samplerInfo.sType(VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO);
+
+            samplerInfo.magFilter(VK_FILTER_NEAREST);
+            samplerInfo.minFilter(VK_FILTER_NEAREST);
+            samplerInfo.mipmapMode(VK_SAMPLER_MIPMAP_MODE_NEAREST);
+            samplerInfo.maxLod(0.0F);
+            samplerInfo.minLod(0.0F);
+
+            samplerInfo.addressModeU(VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER);
+            samplerInfo.addressModeV(VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER);
+            samplerInfo.addressModeW(VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER);
+            samplerInfo.borderColor(VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE);
+
+            samplerInfo.anisotropyEnable(false);
+            samplerInfo.unnormalizedCoordinates(false);
+            samplerInfo.compareEnable(true);
+            samplerInfo.compareOp(VK_COMPARE_OP_LESS_OR_EQUAL);
+
+            LongBuffer pTextureSampler = stack.mallocLong(1);
+
+            if (vkCreateSampler(getVkDevice(), samplerInfo, null, pTextureSampler) != VK_SUCCESS) {
+                throw new RuntimeException("Failed to create shadow sampler");
+            }
+
+            SHADOW_SAMPLER = pTextureSampler.get(0);
+            return SHADOW_SAMPLER;
+        }
+    }
+
     public static void cleanUp() {
         for (long id : SAMPLERS.values()) {
             vkDestroySampler(DeviceManager.vkDevice, id, null);
+        }
+
+        if (SHADOW_SAMPLER != 0L) {
+            vkDestroySampler(DeviceManager.vkDevice, SHADOW_SAMPLER, null);
+            SHADOW_SAMPLER = 0L;
         }
     }
 

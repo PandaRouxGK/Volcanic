@@ -352,6 +352,10 @@ public class WorldRenderer {
         renderer.bindGraphicsPipeline(pipeline);
 
         VTextureSelector.bindShaderTextures(pipeline);
+        // After the engine's own pass over those bindings, which answers every pack name it does not
+        // know with the white texel: the sun's map is one of them, and a terrain stage that samples
+        // it unbound sees lit wherever the map has a caster.
+        net.vulkanmod.vitrail.VitrailWorld.bindTextures();
         VulkanImage normalAtlas = PbrAtlas.getBlockNormalAtlas();
 
         if (normalAtlas != null)
