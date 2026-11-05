@@ -64,6 +64,32 @@ public final class VitrailDebug {
      */
     public static final boolean DRAW = ENABLED && Boolean.getBoolean("vitrail.debug.draw");
 
+    /**
+     * Answers the terrain stage's first target with the three factors that decide whether the sun
+     * reaches a fragment: {@code -Dvitrail.debug.shadowprobe=true}.
+     * <p>
+     * The light a pack adds for the sun is {@code mix(ambient, sun, fullShadow * shadowMult)}, and
+     * {@code fullShadow} is the shadow map's answer multiplied by {@code NoL}, itself gated on the
+     * light map's sky level. Any one of the three at nought leaves the frame lit by ambient alone,
+     * and no picture distinguishes that from a map that was never sampled. So the stage is made to
+     * write {@code (shadow, fullShadow, NoL)} into its first target instead, where the chain probe
+     * reads it back as three channels: the answer is then a number per fragment, not a guess. The
+     * first two are the map's own answer and the sun term it then scales, so a comparison that moves
+     * the first and not the second says the read is not reaching the light.
+     */
+    public static final boolean SHADOW_PROBE = ENABLED && Boolean.getBoolean("vitrail.debug.shadowprobe");
+
+    /**
+     * Runs only the first few passes of the chain: {@code -Dvitrail.debug.chain.limit=0}.
+     *
+     * <p>nought or more leaves that many of the pack's own passes undrawn and skips the final one;
+     * minus one, the default, draws them all. Its use is to read a buffer at the moment the world
+     * stage wrote it: the passes after it answer the same target, so the terrain's own figure never
+     * reaches the end of a frame, and a probe read at the end would be measuring the pack's last
+     * writer rather than the one under test.
+     */
+    public static final int CHAIN_LIMIT = ENABLED ? Integer.getInteger("vitrail.debug.chain.limit", -1) : -1;
+
     private static boolean flagsLogged;
 
     private VitrailDebug() {
@@ -76,7 +102,7 @@ public final class VitrailDebug {
         }
 
         flagsLogged = true;
-        Initializer.LOGGER.info("Vitrail: debug flags, programs={}, probes={}, smoke={}, chain={}, draw={}",
-                PROGRAMS, PROBES, SMOKE, CHAIN, DRAW);
+        Initializer.LOGGER.info("Vitrail: debug flags, programs={}, probes={}, smoke={}, chain={}, draw={}, shadowprobe={}, chainLimit={}",
+                PROGRAMS, PROBES, SMOKE, CHAIN, DRAW, SHADOW_PROBE, CHAIN_LIMIT);
     }
 }

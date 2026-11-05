@@ -130,7 +130,7 @@ final class VitrailProgram {
         }
 
         String vertexText = fullscreenCorners(vertex.text());
-        Bound bound = assignVaryings(assignBindings(vertexText, fragment.text()));
+        Bound bound = shadowProbe(assignVaryings(assignBindings(vertexText, fragment.text())), name);
         dump(name, bound.vertex(), bound.fragment());
 
         VitrailGlobals globals = VitrailGlobals.of(vertex.blockMembers());
@@ -185,7 +185,7 @@ final class VitrailProgram {
             return null;
         }
 
-        Bound bound = assignVaryings(assignBindings(vertex.text(), fragment.text()));
+        Bound bound = shadowProbe(assignVaryings(assignBindings(vertex.text(), fragment.text())), name);
         dump(name, bound.vertex(), bound.fragment());
 
         // A geometry stage draws the world, so the fixed function names carry the camera's
@@ -224,6 +224,41 @@ final class VitrailProgram {
      * Writes the two translated stages beside the log, and only under
      * {@link VitrailDebug#PROGRAMS}: a capture session reads the GLSL, a player never pays for it.
      */
+    /**
+     * Asks a stage that lights the world what it decided, in its own output.
+     * <p>
+     * A pack adds the sun's light as {@code mix(ambient, sun, fullShadow * shadowMult)}, and
+     * {@code fullShadow} is the map's answer multiplied by {@code NoL}, which is itself gated on the
+     * light map's sky level. Any one of those three at nought gives a picture lit by ambient alone,
+     * and no comparison of frames tells that apart from a map that was never sampled. So the stage is
+     * made to write the three into its first target instead, where the chain probe reads them back as
+     * the three channels of a colour: the question becomes three numbers per fragment.
+     * <p>
+     * The rewrite touches a stage only when both of the lines it needs are there, so a program that
+     * does not light anything is compiled from its own text.
+     */
+    static Bound shadowProbe(Bound bound, String name) {
+        if (!VitrailDebug.SHADOW_PROBE) {
+            return bound;
+        }
+
+        String fragment = bound.fragment();
+        String decided = "vec3 fullShadow = max(shadow * NoL, vec3(0.0));";
+        String written = "ofFragData0 = albedo;";
+
+        if (!fragment.contains(decided) || !fragment.contains(written)) {
+            return bound;
+        }
+
+        fragment = fragment.replace("#version 460 core",
+                "#version 460 core\nvec3 ofProbeDecided;")
+                .replace(decided, decided + "\n	ofProbeDecided = vec3(shadow.r, fullShadow.r, NoL);")
+                .replace(written, "ofFragData0 = vec4(clamp(ofProbeDecided, vec3(0.0), vec3(1.0)), 1.0);");
+        Initializer.LOGGER.info("Vitrail: '{}' answers its first target with (shadow, fullShadow, NoL)", name);
+
+        return new Bound(bound.vertex(), fragment);
+    }
+
     static void dump(String name, String vertex, String fragment) {
         if (!VitrailDebug.PROGRAMS) {
             return;

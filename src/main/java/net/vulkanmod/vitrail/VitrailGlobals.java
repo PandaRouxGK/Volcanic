@@ -2,6 +2,7 @@ package net.vulkanmod.vitrail;
 
 import dev.vitrail.glsl.TranslatedUnit;
 import net.minecraft.client.Camera;
+import net.vulkanmod.Initializer;
 import net.minecraft.client.Minecraft;
 import net.minecraft.tags.FluidTags;
 import net.minecraft.world.level.Level;
@@ -81,6 +82,12 @@ final class VitrailGlobals {
      */
     private static final Matrix4f IDENTITY = new Matrix4f();
     private static final Matrix3f IDENTITY3 = new Matrix3f();
+    /**
+     * The light map's unit of a pack's texture matrix: a level arrives as nought to two hundred and
+     * forty and leaves as nought to nought and ninety-three per cent, which is where the sixteen
+     * levels of the light map sit inside a texture's own coordinates.
+     */
+    private static final Matrix4f LIGHTMAP_SCALE = new Matrix4f().scale(1.0F / 256.0F, 1.0F / 256.0F, 1.0F);
 
     private static int frameCounter;
     private static float frameTime;
@@ -102,6 +109,10 @@ final class VitrailGlobals {
      */
     private boolean sun;
     private final List<Slot> slots = new ArrayList<>(64);
+
+    /** The members this frame found nothing to write into, reported once per block. */
+    private final java.util.LinkedHashSet<String> unanswered = new java.util.LinkedHashSet<>();
+    private boolean reportedUnanswered;
     private final ByteBuffer buffer = MemoryUtil.memAlloc(FLOATS * 4);
     private final FloatBuffer values = this.buffer.asFloatBuffer();
 
@@ -191,6 +202,21 @@ final class VitrailGlobals {
      * block is missing one is a stage a value can be written for and read by nobody. This is the
      * list a probe reads when a shadow map is bound and compared and the picture does not move.
      */
+    /**
+     * The names the block carries that this engine left at nought, once, for a capture to read.
+     * A pack reads such a member without knowing it was never written, and one of them is enough to
+     * remove a whole term from the frame, so the list is the first thing to look at when a pack's
+     * lighting is flatter than its own settings say it should be.
+     */
+    void reportUnanswered() {
+        this.reportedUnanswered = true;
+
+        if (!this.unanswered.isEmpty()) {
+            Initializer.LOGGER.info("Vitrail: pack block leaves {} name(s) at nought: {}",
+                    this.unanswered.size(), String.join(", ", this.unanswered));
+        }
+    }
+
     String names() {
         StringBuilder names = new StringBuilder();
 
@@ -224,6 +250,25 @@ final class VitrailGlobals {
     }
 
     /** Writes this frame's values into the buffer the pipeline copies from at every draw. */
+    /**
+     * The twilight band over which a pack fades the sun's whole light away, as Iris answers it: one
+     * while the sun stands clear of the horizon and nought once it is well under.
+     */
+    private static float shadowFade(long dayTime, float partial) {
+        double warped = ((dayTime + partial) / 24000.0 - 0.25) % 1.0;
+
+        if (warped < 0.0) {
+            warped += 1.0;
+        }
+
+        double eased = 0.5 - StrictMath.cos(warped * Math.PI) / 2.0;
+        float skyAngle = (float) ((warped * 2.0 + eased) / 3.0);
+        float sunAngle = skyAngle < 0.75F ? skyAngle + 0.25F : skyAngle - 0.75F;
+        float fade = 1.0F - (Math.abs(Math.abs(sunAngle - 0.5F) - 0.25F) - 0.23F) * 100.0F;
+
+        return Math.max(0.0F, Math.min(1.0F, fade));
+    }
+
     void write(int width, int height) {
         Minecraft client = Minecraft.getInstance();
         Level level = client.level;
@@ -275,6 +320,14 @@ final class VitrailGlobals {
                 // path — so leaving it at the block's nought hands that pack a sun on the eastern
                 // horizon at every hour of the day, whose light no surface faces.
                 case "timeAngle" -> put(slot, (float) ((dayTime % 24000L + partial) / 24000.0));
+                // How much of the sun's own light reaches the frame at this hour. It is not the
+                // shadow map's fade, which a pack computes per fragment from the sampled position,
+                // but the one that scales the whole sun term: BSL multiplies it into
+                // `shadowMult` and mixes ambient with sunlight by the result, so a nought here
+                // leaves a world lit entirely by ambient, with the map sampled and its answer
+                // multiplied out again, which is a picture no comparison of frames can attribute.
+                // Left at the block's nought this was the reason a pack's shadows never appeared.
+                case "shadowFade" -> put(slot, shadowFade(dayTime, partial));
                 case "worldDay" -> putInt(slot, (int) (dayTime / 24000L));
                 case "moonPhase" -> putInt(slot, (int) ((dayTime / 24000L) % 8L));
 
@@ -310,10 +363,17 @@ final class VitrailGlobals {
                 // that read it back rather than for the geometry drawn today.
                 case "of_NormalMatrix" -> put(slot, this.fullscreen ? IDENTITY3
                         : this.sun ? normalMatrix(shadowView()) : normalMatrix(modelView));
-                // Eight identity matrices, which is what the game itself publishes for every unit
-                // but the one a draw scrolls. Unit nought maps a block's uv and unit one its light
-                // map, and a pack reads them rather than the raw attributes.
-                case "of_TextureMatrix" -> putIdentities(slot);
+                // Unit nought maps a block's uv, which every family already stores scaled to the
+                // atlas, so it is the identity there. Unit one maps the light map, and that pair is
+                // handed over raw: a level runs from nought to two hundred and forty, one byte a
+                // side of the position's last word. The scale belongs here and not in the vertex
+                // prologue, because the pack applies it itself and because it brings the half texel
+                // that centres the sample on its level with it: a pack maps this pair with
+                // {@code (lm - 0.03125) * 1.06667}, which lands a full level on one only when the
+                // raw two hundred and forty has already become nought and ninety-three per cent.
+                // Answering the identity instead left every fragment on the same saturated pair, so
+                // the world was lit by ambient alone and the sun's own term had nothing to reach.
+                case "of_TextureMatrix" -> putTextureMatrices(slot);
 
                 case "gbufferModelView" -> put(slot, modelView);
                 case "gbufferModelViewInverse" -> put(slot, inverseModelView);
@@ -381,9 +441,15 @@ final class VitrailGlobals {
                 // sampled depth already matches, so only the write half moves.
                 case "of_DepthConv" -> put(slot, 0.5F, 0.5F, 1.0F, 0.0F);
 
-                default -> {
-                }
+                // Every other name is a member this engine has nothing to say about, and it is
+                // reported rather than left to be discovered from a picture: a single one of these
+                // at nought is enough to remove a term from the frame.
+                default -> this.unanswered.add(slot.name());
             }
+        }
+
+        if (!this.reportedUnanswered && VitrailDebug.ENABLED) {
+            reportUnanswered();
         }
     }
 
@@ -623,6 +689,22 @@ final class VitrailGlobals {
     }
 
     /** One identity per element of an array of matrices, at the stride the layout gave it. */
+    /**
+     * The eight units of a pack's texture matrix: identity for the atlas, the light map's raw pair
+     * scaled to its own levels for unit one, and identity for the six the frame leaves alone.
+     */
+    private void putTextureMatrices(Slot slot) {
+        for (int i = 0; i < slot.count(); i++) {
+            this.values.position(slot.offset() + i * slot.stride());
+
+            if (i == 1) {
+                LIGHTMAP_SCALE.get(this.values);
+            } else {
+                IDENTITY.get(this.values);
+            }
+        }
+    }
+
     private void putIdentities(Slot slot) {
         for (int i = 0; i < slot.count(); i++) {
             this.values.position(slot.offset() + i * slot.stride());

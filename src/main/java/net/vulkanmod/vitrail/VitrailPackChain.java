@@ -673,6 +673,10 @@ public final class VitrailPackChain implements AutoCloseable {
                 stage.globals().write(this.width, this.height);
             }
 
+            if (VitrailDebug.CHAIN_LIMIT >= 0 && drawn >= VitrailDebug.CHAIN_LIMIT) {
+                break;
+            }
+
             stage.pass().beginLoaded(commandBuffer, stack);
             bind(stage, engine);
             stage.pass().drawFullscreen(stage.pipeline());
@@ -681,7 +685,7 @@ public final class VitrailPackChain implements AutoCloseable {
         }
 
         GpuTexture lastPass = lastPassTarget();
-        boolean showedFinal = drawFinal(commandBuffer, stack, engine);
+        boolean showedFinal = VitrailDebug.CHAIN_LIMIT < 0 && drawFinal(commandBuffer, stack, engine);
 
         if (showedFinal) {
             drawn++;
@@ -694,6 +698,23 @@ public final class VitrailPackChain implements AutoCloseable {
             Initializer.LOGGER.info("Vitrail: pack chain samplers at draw, {} with an image, {} on the white texel{}",
                     this.boundServed, this.boundWhite,
                     this.whiteNames.isEmpty() ? "" : ": " + String.join(", ", this.whiteNames));
+
+            // Which uniforms each of the pack's own passes was given, once: a stage whose block is
+            // missing the matrices a shadow projection is built from reads a map it cannot place,
+            // and that reads exactly like a term worth nought. The world's stage has said this for
+            // a while; the passes that actually shade the frame are the ones a pack defers to.
+            for (Stage stage : this.stages) {
+                if (stage.globals() != null) {
+                    Initializer.LOGGER.info("Vitrail: pack chain block, {} publishes {} uniform(s) [{}]",
+                            stage.name(), stage.globals().size() / 4, stage.globals().names());
+                }
+            }
+
+            if (this.finalStage != null && this.finalStage.globals() != null) {
+                Initializer.LOGGER.info("Vitrail: pack chain block, {} publishes {} uniform(s) [{}]",
+                        this.finalStage.name(), this.finalStage.globals().size() / 4,
+                        this.finalStage.globals().names());
+            }
         }
 
         if (!this.drewOnce) {

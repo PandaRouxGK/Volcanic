@@ -95,6 +95,28 @@ public class SPIRVUtils {
         return null;
     }
 
+    /**
+     * Counts the image instructions of a fragment program that sample a depth comparison sampler.
+     * A pack only reaches its shadow map through those, so a program that reports zero here cannot
+     * be reading the map at all, whatever its translated source appears to contain: the source keeps
+     * both branches of every #if, and only the compiler says which one survives.
+     */
+    private static void reportComparisonSamples(String filename, ByteBuffer spirv) {
+        int words = spirv.remaining() / 4;
+        int dref = 0, plain = 0;
+        for (int i = 5; i < words; ) {
+            int word = spirv.getInt(spirv.position() + i * 4);
+            int opcode = word & 0xFFFF;
+            int count = word >>> 16;
+            if (count == 0) break;
+            if (opcode == 89 || opcode == 90 || opcode == 93 || opcode == 94) dref++;
+            else if (opcode == 87 || opcode == 88) plain++;
+            i += count;
+        }
+        net.vulkanmod.Initializer.LOGGER.info("Vitrail: SPIR-V {}, {} comparison samples, {} plain samples",
+                filename, dref, plain);
+    }
+
     public static SPIRV compileShader(String filename, String source, ShaderKind shaderKind) {
         long startTime = System.nanoTime();
 
@@ -134,6 +156,9 @@ public class SPIRVUtils {
         time += elapsed / 1000000.0f;
 
         recordCompileForProfiler(elapsed);
+
+        if (Boolean.getBoolean("vitrail.debug") && shaderKind == ShaderKind.FRAGMENT_SHADER)
+            reportComparisonSamples(filename, shaderc_result_get_bytes(result));
 
         return new SPIRV(result, shaderc_result_get_bytes(result));
     }

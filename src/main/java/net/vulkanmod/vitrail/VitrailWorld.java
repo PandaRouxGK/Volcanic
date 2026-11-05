@@ -238,8 +238,8 @@ public final class VitrailWorld implements AutoCloseable {
             throw new IllegalStateException(name + ": the pack serves only one of the two stages");
         }
 
-        VitrailProgram.Bound bound = VitrailProgram.assignVaryings(
-                VitrailProgram.assignBindings(vertex.text(), fragment.text()));
+        VitrailProgram.Bound bound = VitrailProgram.shadowProbe(VitrailProgram.assignVaryings(
+                VitrailProgram.assignBindings(vertex.text(), fragment.text())), name);
 
         VitrailProgram.dump(name, bound.vertex(), bound.fragment());
 
