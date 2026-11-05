@@ -99,7 +99,28 @@ public class SPIRVUtils {
         long startTime = System.nanoTime();
 
         source = rewriteLegacyReservedIdentifiers(source);
-        long result = shaderc_compile_into_spv(compiler, source, shaderKind.kind, filename, "main", options);
+
+        // The CharSequence overload marshals its arguments onto the calling thread's LWJGL stack,
+        // which is 64 KiB unless the JVM was told otherwise: a pack's translated program is several
+        // hundred kilobytes, so that overload overflows it with "Out of stack space" before the
+        // compiler is even called. The ByteBuffer overload is no use either, as this LWJGL build
+        // gives shaderc a size that runs past the buffer. So the native entry point is called
+        // directly with heap buffers, the length stated beside the text, and the NUL kept in the
+        // allocation but not counted, which is what the compiler requires.
+        ByteBuffer sourceBuffer = memUTF8(source, true);
+        ByteBuffer filenameBuffer = memUTF8(filename, true);
+        ByteBuffer entryPointBuffer = memUTF8("main", true);
+        long result;
+
+        try {
+            result = nshaderc_compile_into_spv(compiler, MemoryUtil.memAddress(sourceBuffer),
+                    sourceBuffer.remaining() - 1, shaderKind.kind, MemoryUtil.memAddress(filenameBuffer),
+                    MemoryUtil.memAddress(entryPointBuffer), options);
+        } finally {
+            memFree(sourceBuffer);
+            memFree(filenameBuffer);
+            memFree(entryPointBuffer);
+        }
 
         if (result == NULL) {
             throw new RuntimeException("Failed to compile shader " + filename + " into SPIR-V");

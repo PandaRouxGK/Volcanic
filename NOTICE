@@ -38,6 +38,25 @@ compatibility, release metadata cleanup, and local compatibility fixes.
 
 Original authorship and contribution credit belongs to xCollateral and VulkanMod contributors.
 
+Third-party code:
+
+  - The OptiFine/Iris shader-pack front end under src/main/java/dev/vitrail/ is
+    derived from Vitrail Shaders 0.13.0-beta (GPL-3.0-only),
+    https://modrinth.com/mod/vitrail-shaders, upstream commit
+    7a3cdcbe1dfd7e04fb2b3021ee8352d341e7647e. 207 files are carried here; 21 were
+    modified for Minecraft 1.21.1 and this engine, the rest are verbatim.
+  - Vitrail Shaders in turn credits Iris (GPL-3.0) and Kroppeb's stareval
+    (LGPL-3.0, relocated here under dev.vitrail.uniform.expr.kroppeb.stareval),
+    file by file in its own NOTICE. Those portions remain under their original
+    licences.
+  - The Vitrail runtime port (pack chain, colour targets, geometry and shadow
+    stages) is being derived from the same GPL-3.0 source.
+
+  These files are GPL-3.0, not LGPL-3.0. GPLv3 section 3 permits combining them
+  with this fork's LGPL-3.0 lineage, but a distributed build that includes them
+  is a GPL-3.0 work. That consequence is a licensing decision still open for
+  this fork; it is stated here rather than left implicit.
+
 This fork is not endorsed by or affiliated with the upstream VulkanMod maintainers or the Reforged
 maintainer. The VulkanMod name, logo, and related project branding may be subject to rights outside
 the LGPLv3 code license.

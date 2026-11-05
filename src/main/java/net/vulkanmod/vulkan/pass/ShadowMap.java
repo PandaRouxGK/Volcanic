@@ -9,6 +9,7 @@ import net.vulkanmod.vulkan.framebuffer.RenderPass;
 import net.vulkanmod.vulkan.texture.VulkanImage;
 import net.minecraft.world.phys.Vec3;
 import org.joml.Matrix4f;
+import org.joml.Matrix4fc;
 import org.joml.Vector3f;
 import org.lwjgl.system.MemoryStack;
 import org.lwjgl.vulkan.VkCommandBuffer;
@@ -60,11 +61,50 @@ public class ShadowMap {
     private final Matrix4f[] sunView = new Matrix4f[CASCADES];
     private final Matrix4f[] sunProj = new Matrix4f[CASCADES];
 
+    /** The cascade a shader pack is handed, since a pack asks for one map and this class builds three. */
+    public static final int PACK_CASCADE = CASCADES - 1;
+
+    private static ShadowMap active;
+
     public ShadowMap() {
         for (int i = 0; i < CASCADES; i++) {
             this.sunView[i] = new Matrix4f();
             this.sunProj[i] = new Matrix4f();
         }
+
+        active = this;
+    }
+
+    /**
+     * The map the main pass built this frame, for a shader pack to sample.
+     * <p>
+     * A pack's {@code shadowtex} names are the depth of one orthographic sun map, and this engine
+     * already renders three of them; answering the names with a white texel said the scene had no
+     * caster at all, which is a lit scene rather than a shadowed one. Null before the first frame.
+     */
+    public static ShadowMap active() {
+        return active;
+    }
+
+    /**
+     * The sun's view and projection for one cascade, in the pack's minus one to one clip volume.
+     * <p>
+     * Handed out as built: {@link VRenderSystem#applyMVP} halves the z row into Vulkan's zero to one
+     * volume afterwards, and the snapshot a pack is given must stay in the volume it is written
+     * against, exactly as the camera's projection is un-halved for it. The depth the pack samples
+     * needs no such conversion, because both volumes name the same depth for a fragment.
+     */
+    public Matrix4fc sunView(int cascade) {
+        return this.sunView[Math.max(0, Math.min(CASCADES - 1, cascade))];
+    }
+
+    public Matrix4fc sunProjection(int cascade) {
+        return this.sunProj[Math.max(0, Math.min(CASCADES - 1, cascade))];
+    }
+
+    /** How far from the camera cascade {@code i} reaches, which is the pack's shadow distance. */
+    public static float packRadius() {
+        return cascadeRadius(PACK_CASCADE);
     }
 
     private void ensureResources() {

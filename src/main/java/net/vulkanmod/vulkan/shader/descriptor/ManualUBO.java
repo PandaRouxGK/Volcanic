@@ -13,11 +13,16 @@ public class ManualUBO extends UBO {
         super(binding, type, size * 4, null);
     }
 
+    /** How many times a block has been copied to the GPU, for the front end's own diagnosis. */
+    public static int UPDATES;
+
     @Override
     public void update(long ptr) {
         // update manually
-        if (update)
+        if (update) {
             MemoryUtil.memCopy(this.srcPtr, ptr, this.srcSize);
+            UPDATES++;
+        }
     }
 
     public void setSrc(long ptr, int size) {

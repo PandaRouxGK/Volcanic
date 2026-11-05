@@ -34,6 +34,8 @@ public class Framebuffer {
 
     private VulkanImage colorAttachment;
     private VulkanImage colorAttachment2;
+    /** Colour attachments past the second, in the order a fragment output location numbers them. */
+    private VulkanImage[] extraColorAttachments = new VulkanImage[0];
     protected VulkanImage depthAttachment;
 
     private final ObjectArrayList<RenderPass> renderPasses = new ObjectArrayList<>();
@@ -58,6 +60,8 @@ public class Framebuffer {
             this.createImages();
         else {
             this.colorAttachment = builder.colorAttachment;
+            this.colorAttachment2 = builder.colorAttachment2;
+            this.extraColorAttachments = builder.extraColorAttachments;
             this.depthAttachment = builder.depthAttachment;
         }
     }
@@ -107,17 +111,20 @@ public class Framebuffer {
 
         try (MemoryStack stack = MemoryStack.stackPush()) {
 
-            LongBuffer attachments;
-            if (colorAttachment == null) {
+            int colorCount = getColorAttachmentCount();
+
+            if (colorCount == 0) {
                 throw new IllegalStateException();
-            } else if (colorAttachment2 != null && depthAttachment != null) {
-                attachments = stack.longs(colorAttachment.getAttachmentView(), colorAttachment2.getAttachmentView(), depthAttachment.getAttachmentView());
-            } else if (colorAttachment2 != null) {
-                attachments = stack.longs(colorAttachment.getAttachmentView(), colorAttachment2.getAttachmentView());
-            } else if (depthAttachment != null) {
-                attachments = stack.longs(colorAttachment.getAttachmentView(), depthAttachment.getAttachmentView());
-            } else {
-                attachments = stack.longs(colorAttachment.getAttachmentView());
+            }
+
+            LongBuffer attachments = stack.mallocLong(colorCount + (depthAttachment != null ? 1 : 0));
+
+            for (int i = 0; i < colorCount; i++) {
+                attachments.put(i, getColorAttachment(i).getAttachmentView());
+            }
+
+            if (depthAttachment != null) {
+                attachments.put(colorCount, depthAttachment.getAttachmentView());
             }
 
             LongBuffer pFramebuffer = stack.mallocLong(1);
@@ -189,6 +196,9 @@ public class Framebuffer {
             if (this.colorAttachment2 != null)
                 this.colorAttachment2.free();
 
+            for (VulkanImage extra : this.extraColorAttachments)
+                extra.free();
+
             if (this.depthAttachment != null)
                 this.depthAttachment.free();
         }
@@ -221,8 +231,50 @@ public class Framebuffer {
         return colorAttachment2;
     }
 
+    /**
+     * One colour attachment by index, in the order a fragment output location numbers them.
+     * <p>
+     * The first two go through the named accessors rather than the fields, because the swapchain
+     * overrides them: its images are the driver's, one per frame, and never live in this object.
+     */
+    public VulkanImage getColorAttachment(int index) {
+        if (index == 0) {
+            return getColorAttachment();
+        }
+
+        if (index == 1) {
+            return getColorAttachment2();
+        }
+
+        return this.extraColorAttachments[index - 2];
+    }
+
+    /** The format of one colour attachment, which is what a render pass declares. */
+    public int getColorAttachmentFormat(int index) {
+        if (index == 0) {
+            return this.format;
+        }
+
+        if (index == 1) {
+            return this.format2;
+        }
+
+        return this.extraColorAttachments[index - 2].format;
+    }
+
+    /** How many colour attachments this framebuffer has past the two named ones. */
+    public int getExtraColorAttachmentCount() {
+        return this.extraColorAttachments.length;
+    }
+
     public int getColorAttachmentCount() {
-        return this.colorAttachment2 != null ? 2 : (this.colorAttachment != null ? 1 : 0);
+        int count = this.colorAttachment != null ? 1 : 0;
+
+        if (this.colorAttachment2 != null) {
+            count++;
+        }
+
+        return count + this.extraColorAttachments.length;
     }
 
     public int getWidth() {
@@ -249,12 +301,25 @@ public class Framebuffer {
         return new Builder(colorAttachment, depthAttachment);
     }
 
+    /**
+     * A framebuffer over images the caller owns, one per colour attachment, in the order the
+     * fragment output locations number them.
+     * <p>
+     * The engine's own targets have one or two colour attachments and keep using the builders
+     * above; this one exists for a renderer that has to answer a shader writing fourteen.
+     */
+    public static Builder builder(VulkanImage[] colorAttachments, VulkanImage depthAttachment) {
+        return new Builder(colorAttachments, depthAttachment);
+    }
+
     public static class Builder {
         final boolean createImages;
         final int width, height;
         int format, format2, depthFormat;
 
         VulkanImage colorAttachment;
+        VulkanImage colorAttachment2;
+        VulkanImage[] extraColorAttachments = new VulkanImage[0];
         VulkanImage depthAttachment;
 
 //        int colorAttachments;
@@ -291,6 +356,30 @@ public class Framebuffer {
 
             this.width = colorAttachment.width;
             this.height = colorAttachment.height;
+            this.hasColorAttachment = true;
+            this.hasDepthAttachment = depthAttachment != null;
+
+            this.depthFormat = this.hasDepthAttachment ? depthAttachment.format : 0;
+            this.linearFiltering = true;
+            this.depthLinearFiltering = false;
+        }
+
+        public Builder(VulkanImage[] colorAttachments, VulkanImage depthAttachment) {
+            Validate.isTrue(colorAttachments != null && colorAttachments.length > 0, "At least 1 colour attachment needed");
+
+            this.createImages = false;
+            this.colorAttachment = colorAttachments[0];
+            this.colorAttachment2 = colorAttachments.length > 1 ? colorAttachments[1] : null;
+            this.extraColorAttachments = colorAttachments.length > 2
+                    ? Arrays.copyOfRange(colorAttachments, 2, colorAttachments.length)
+                    : new VulkanImage[0];
+            this.depthAttachment = depthAttachment;
+
+            this.format = colorAttachments[0].format;
+            this.format2 = this.colorAttachment2 != null ? this.colorAttachment2.format : 0;
+
+            this.width = colorAttachments[0].width;
+            this.height = colorAttachments[0].height;
             this.hasColorAttachment = true;
             this.hasDepthAttachment = depthAttachment != null;
 

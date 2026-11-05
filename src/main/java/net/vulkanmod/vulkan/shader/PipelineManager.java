@@ -51,6 +51,17 @@ public abstract class PipelineManager {
         terrainRoleProviders.put(role, provider);
     }
 
+    /**
+     * The provider a role answers with at this moment, so a pack can wrap it instead of replacing it.
+     * <p>
+     * Replacing it outright would leave every render type the pack does not draw with no pipeline at
+     * all. Reading the current one first is what keeps a fallback: the wrapper asks the pack for the
+     * types it draws and hands the rest back to whoever answered before.
+     */
+    public final Function<TerrainRenderType, GraphicsPipeline> terrainRole(String role) {
+        return this.terrainRoleProviders.get(role);
+    }
+
     public RenderPipeline getPipeline(String role, TerrainRenderType renderType) {
         Function<TerrainRenderType, GraphicsPipeline> provider = terrainRoleProviders.get(role);
         if (provider == null)

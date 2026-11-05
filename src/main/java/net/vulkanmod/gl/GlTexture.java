@@ -412,6 +412,7 @@ public class GlTexture {
 
         GlBuffer buffer = GlBuffer.getPixelPackBufferBound();
         long ptr;
+        long destCapacity;
         if (buffer != null) {
 
             if (buffer.data == null) {
@@ -422,15 +423,17 @@ public class GlTexture {
             buffer.data.position((int) pixels);
 
             ptr = MemoryUtil.memAddress(buffer.data);
+            destCapacity = buffer.data.remaining();
         } else {
             ptr = pixels;
+            destCapacity = Long.MAX_VALUE;
         }
 
         Renderer renderer = Renderer.getInstance();
         if (renderer != null && Renderer.isRecording())
             renderer.flushCmds();
 
-        ImageUtil.downloadTexture(image, ptr);
+        ImageUtil.downloadTexture(image, ptr, destCapacity);
     }
 
     public static void setVulkanImage(int id, VulkanImage vulkanImage) {

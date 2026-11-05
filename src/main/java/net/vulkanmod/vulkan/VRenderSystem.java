@@ -181,6 +181,14 @@ public abstract class VRenderSystem {
     public static float capturedShadowIntensity = 0.0f;
     public static float getCapturedShadowIntensity() {
         if (!net.vulkanmod.Initializer.CONFIG.shadowsEnabled) return 0.0f;
+
+        // An intensity is only meaningful with the cascade map that goes with it, and that map is the
+        // engine's own radiance pipeline's: its radius stops a few chunks out. A selection that is
+        // not that pipeline still receives this uniform, and the fog then samples the cascades past
+        // their radius and turns the far terrain dark - the band that shows up the moment shaders are
+        // switched on. Nothing is shadowed by a map that was not filled for this frame.
+        if (!net.vulkanmod.Initializer.CONFIG.isCamille()) return 0.0f;
+
         return capturedShadowIntensity;
     }
 

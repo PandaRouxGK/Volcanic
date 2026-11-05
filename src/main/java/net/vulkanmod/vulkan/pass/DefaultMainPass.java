@@ -10,6 +10,11 @@ import net.vulkanmod.render.framegraph.FrameGraph;
 import net.vulkanmod.render.framegraph.FrameGraphImpl;
 import net.vulkanmod.render.framegraph.Phase;
 import net.vulkanmod.render.pack.PackPipeline;
+import net.vulkanmod.vitrail.VitrailChain;
+import net.vulkanmod.vitrail.VitrailFacadeSmoke;
+import net.vulkanmod.vitrail.VitrailPacks;
+
+import java.nio.file.Path;
 import net.vulkanmod.render.pack.ShaderPack;
 import net.vulkanmod.rendergraph.radiance.pipeline.RadianceOpaqueTintPipeline;
 import net.vulkanmod.vulkan.Renderer;
@@ -58,6 +63,7 @@ public class DefaultMainPass implements MainPass {
     private VulkanImage capturedForegroundDepth;
     private int scaledDepthClears;
     private boolean liveDepthIsForeground;
+    private boolean worldDepthSnapshotPending;
 
     private Framebuffer materialFramebuffer;
     private RenderPass materialRenderPass;
@@ -121,6 +127,16 @@ public class DefaultMainPass implements MainPass {
             builder.getColorAttachmentInfo2().setOps(VK_ATTACHMENT_LOAD_OP_CLEAR, VK_ATTACHMENT_STORE_OP_STORE);
         }
 
+        // A framebuffer the world is drawn into carries one attachment per buffer the pack writes;
+        // the two configured above are its first two. The rest need ops and a final layout of their
+        // own: declared but never configured, they leave a pass writing location two without a
+        // target, and the draw is refused.
+        for (int i = 2; i < framebuffer.getColorAttachmentCount(); i++) {
+            builder.getColorAttachmentInfo(i)
+                    .setOps(VK_ATTACHMENT_LOAD_OP_LOAD, VK_ATTACHMENT_STORE_OP_STORE)
+                    .setFinalLayout(VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+        }
+
         RenderPass main = builder.build();
 
         builder = RenderPass.builder(framebuffer);
@@ -136,7 +152,28 @@ public class DefaultMainPass implements MainPass {
         return new RenderPass[]{main, builder.build()};
     }
 
+    private Framebuffer worldRenderPassFramebuffer;
+    private RenderPass worldMainRenderPass;
+    private RenderPass worldAuxRenderPass;
+
     private void bindRenderPasses() {
+        // The pass the world is drawn into when a pack draws it: its framebuffer is neither the
+        // swapchain nor the render scale target, and its render passes are built for its own set of
+        // colour attachments.
+        if (this.mainFramebuffer != null && this.mainFramebuffer != this.swapChain
+                && this.mainFramebuffer != this.scaledFramebuffer) {
+            if (this.worldRenderPassFramebuffer != this.mainFramebuffer) {
+                RenderPass[] passes = buildRenderPasses(this.mainFramebuffer);
+                this.worldMainRenderPass = passes[0];
+                this.worldAuxRenderPass = passes[1];
+                this.worldRenderPassFramebuffer = this.mainFramebuffer;
+            }
+
+            this.mainRenderPass = this.worldMainRenderPass;
+            this.auxRenderPass = this.worldAuxRenderPass;
+            return;
+        }
+
         if (this.scaledFramebuffer != null && this.mainFramebuffer == this.scaledFramebuffer) {
             if (this.scaledMainRenderPass == null) {
                 RenderPass[] passes = buildRenderPasses(this.scaledFramebuffer);
@@ -157,6 +194,44 @@ public class DefaultMainPass implements MainPass {
 
         this.mainRenderPass = this.swapMainRenderPass;
         this.auxRenderPass = this.swapAuxRenderPass;
+    }
+
+    /**
+     * The pass that draws into a framebuffer other than the one the frame chose.
+     * <p>
+     * {@code auxRenderPass} belongs to the frame's main framebuffer, and while a pack draws the
+     * world that framebuffer carries one colour attachment per buffer the pack writes. The depth
+     * snapshot still takes the engine's scaled framebuffer at the end of the frame, and beginning
+     * its pass with the world's — declared with more attachments than the framebuffer it is bound
+     * to — is what the driver crashed on when the window left full screen. A pass has to match the
+     * framebuffer it is begun on, so this answers for that framebuffer rather than for the frame.
+     */
+    private RenderPass auxRenderPassFor(Framebuffer framebuffer) {
+        if (framebuffer == null || framebuffer == this.mainFramebuffer) {
+            return this.auxRenderPass;
+        }
+
+        if (framebuffer == this.scaledFramebuffer) {
+            if (this.scaledAuxRenderPass == null) {
+                RenderPass[] passes = buildRenderPasses(framebuffer);
+                this.scaledMainRenderPass = passes[0];
+                this.scaledAuxRenderPass = passes[1];
+            }
+
+            return this.scaledAuxRenderPass;
+        }
+
+        if (framebuffer == this.swapChain) {
+            if (this.swapAuxRenderPass == null) {
+                RenderPass[] passes = buildRenderPasses(framebuffer);
+                this.swapMainRenderPass = passes[0];
+                this.swapAuxRenderPass = passes[1];
+            }
+
+            return this.swapAuxRenderPass;
+        }
+
+        return buildRenderPasses(framebuffer)[1];
     }
 
     private void createPresentRenderPass() {
@@ -223,7 +298,115 @@ public class DefaultMainPass implements MainPass {
             this.scaledFramebufferScale = scale;
         }
 
+        if (this.adoptWorldTarget()) {
+            return;
+        }
+
         setMainFramebuffer(this.scaledFramebuffer);
+    }
+
+    /**
+     * Draws the world into the pack's own colour buffers instead of the engine's target.
+     * <p>
+     * The pack's geometry stage writes several locations, one per buffer its {@code DRAWBUFFERS}
+     * comment names. In the engine's framebuffer those locations are its colour, normal, light and
+     * material images, and its lighting reads a pack's albedo where it expects a normal. Drawn into
+     * the chain's pool instead, the same locations land on {@code colortex0} to {@code colortexN},
+     * which is where the pack's {@code deferred} and {@code composite} passes look for them.
+     * <p>
+     * The depth is the engine's own, lent for the frame: the terrain is still drawn from its mesh
+     * and the pack reads {@code depthtex} from that same image. The framebuffer is adopted only when
+     * the chain is built, holds the right size, and the pack really has an {@code all_solid}.
+     */
+    /**
+     * Whether this frame is a world frame: a level, no screen open, and no loading overlay.
+     * <p>
+     * One answer for the two decisions that must never disagree — drawing the world into the pack's
+     * buffers, and presenting what came out of them. When they were decided apart, a frame existed
+     * where the world went into the pack's buffers and nobody presented them, and the screen kept
+     * the last picture it had.
+     */
+    private static boolean worldFrameActive() {
+        Minecraft minecraft = Minecraft.getInstance();
+
+        return minecraft.level != null
+                && minecraft.screen == null
+                && !(minecraft.getOverlay() instanceof net.minecraft.client.gui.screens.LoadingOverlay);
+    }
+
+    /**
+     * Whether this framebuffer draws with the depth image the post shaders read.
+     * <p>
+     * The identity of the framebuffer was the wrong question: the world can be drawn into the pack's
+     * own colour buffers while still using the engine's depth. The depth snapshot and the suppressed
+     * clear belong to that depth image, whichever framebuffer carries it — asked by identity, the
+     * capture stopped as soon as the world moved, no depth was handed to the chain, and no resolver
+     * was ever reached.
+     */
+    private boolean carriesWorldDepth(Framebuffer framebuffer) {
+        return framebuffer != null
+                && this.scaledFramebuffer != null
+                && framebuffer.getDepthAttachment() != null
+                && framebuffer.getDepthAttachment() == this.scaledFramebuffer.getDepthAttachment();
+    }
+
+    private boolean adoptWorldTarget() {
+        if (!net.vulkanmod.vitrail.VitrailChain.drawsWorld()) {
+            return false;
+        }
+
+        String selection = Initializer.CONFIG.selectedShader;
+
+        if (!VitrailPacks.isSelection(selection)) {
+            return false;
+        }
+
+        Path pack = VitrailPacks.path(VitrailPacks.idOf(selection));
+
+        if (pack == null) {
+            return false;
+        }
+
+        // Adopting the pack's buffers and presenting them are decided by one answer, and this is it.
+        // Deciding them apart is what left a frame in which the world was drawn into the pack's
+        // buffers and nothing presented them: the screen then kept the last picture it had.
+        if (!worldFrameActive()) {
+            return false;
+        }
+
+        net.vulkanmod.vitrail.VitrailChain chain = net.vulkanmod.vitrail.VitrailChain.of(pack);
+
+        if (chain == null || !chain.ready() || this.scaledFramebuffer == null) {
+            return false;
+        }
+
+        int width = this.scaledFramebuffer.getWidth();
+        int height = this.scaledFramebuffer.getHeight();
+
+        try (MemoryStack stack = MemoryStack.stackPush()) {
+            if (!chain.ensured(Renderer.getCommandBuffer(), stack, width, height)) {
+                return false;
+            }
+
+            Framebuffer world = chain.worldFramebuffer(width, height, this.scaledFramebuffer.getDepthAttachment());
+
+            if (world == null) {
+                return false;
+            }
+
+            if (this.mainFramebuffer != world) {
+                this.mainFramebuffer = world;
+                bindRenderPasses();
+            }
+
+            if (!this.reportedWorldTarget) {
+                this.reportedWorldTarget = true;
+                Initializer.LOGGER.info("Vitrail: the world is drawn into the chain's {} colour buffer(s) at {}x{}",
+                        world.getColorAttachmentCount(), world.getWidth(), world.getHeight());
+            }
+
+            return true;
+        }
     }
 
     private boolean shouldUseScaledFramebuffer(int scale) {
@@ -240,6 +423,11 @@ public class DefaultMainPass implements MainPass {
     }
 
     public static boolean postShaderActive() {
+        // Not narrowed for a Vitrail selection: this is also what makes the pass capture the world
+        // depth, and without that capture no resolver is reached at all — the pack would never run.
+        // The engine's own lighting and cascades are kept away from such a selection where they are
+        // actually applied instead: the shadow map is only filled for the engine's radiance pipeline
+        // and its intensity reads nought for anything else.
         return Initializer.CONFIG.shadersEnabled && !"off".equals(Initializer.CONFIG.selectedShader)
                 && !net.vulkanmod.render.sodium.SodiumShaderBridge.isActive();
     }
@@ -294,8 +482,19 @@ public class DefaultMainPass implements MainPass {
         this.scaledFramebufferScale = RenderScale.DEFAULT;
     }
 
+    /**
+     * Whether this frame is drawn at the render scale's own size, which is what the post path and the
+     * present path are built around.
+     * <p>
+     * Identity with the scaled framebuffer was too narrow. Once the world is drawn into the chain's
+     * pool, the pool replaces that framebuffer for the frame: same size, built on the same depth
+     * image. Asked by identity, the frame took the unscaled branch in {@link #end}, the chain was
+     * never reached, and nothing was presented at all — the world went into the pool and the
+     * swapchain kept whatever it had. That is the frame that never rendered.
+     */
     private boolean isUsingScaledFramebuffer() {
-        return this.scaledFramebuffer != null && this.mainFramebuffer == this.scaledFramebuffer;
+        return this.scaledFramebuffer != null
+                && (this.mainFramebuffer == this.scaledFramebuffer || carriesWorldDepth(this.mainFramebuffer));
     }
 
     public static int consumeTargetSwitches() {
@@ -340,6 +539,10 @@ public class DefaultMainPass implements MainPass {
 
         frameGraph.get().execute(
                 Phase.FRAME_START, commandBuffer, stack, name -> null, () -> {});
+
+        // Debug only, and a no-op unless -Dvitrail.debug.smoke=true: records the facade's own pass
+        // before the main one opens, since the engine owns no pass of its own here yet.
+        VitrailFacadeSmoke.tick(commandBuffer, stack);
 
         VulkanImage colorAttachment = this.mainFramebuffer.getColorAttachment();
         colorAttachment.transitionImageLayout(stack, commandBuffer, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
@@ -394,7 +597,15 @@ public class DefaultMainPass implements MainPass {
 
     public void renderShadowMap(VkCommandBuffer commandBuffer, MemoryStack stack) {
         Minecraft mc = Minecraft.getInstance();
-        if (!Initializer.CONFIG.shadowsEnabled || !postShaderActive() || mc.level == null) {
+        // The cascade shadow map is filled from a frustum that only covers a few chunks around the
+        // player, and only a pipeline that knows how to treat a sample outside it can read it: the
+        // engine's own radiance pipeline, or a Vitrail pack, whose shaders test the map themselves.
+        // Rendered for any other selection, the terrain shader reads outside the cascades past that
+        // radius and darkens, which is the band that appears as soon as shaders are switched on
+        // with a pack that draws nothing of its own yet.
+        if (!Initializer.CONFIG.shadowsEnabled || !postShaderActive() || mc.level == null
+                || !(Initializer.CONFIG.isCamille()
+                || VitrailPacks.isSelection(Initializer.CONFIG.selectedShader))) {
             return;
         }
         float a = net.vulkanmod.vulkan.VRenderSystem.smoothTimeOfDay(mc) * ((float) Math.PI * 2.0f);
@@ -649,7 +860,8 @@ public class DefaultMainPass implements MainPass {
 
             Renderer.getInstance().endRenderPass(commandBuffer);
 
-            this.scaledFramebuffer.beginRenderPass(commandBuffer, this.auxRenderPass, stack);
+            this.scaledFramebuffer.beginRenderPass(
+                    commandBuffer, auxRenderPassFor(this.scaledFramebuffer), stack);
             Renderer.setViewportScale(this.swapChain.getWidth(), this.swapChain.getHeight());
         }
     }
@@ -680,7 +892,8 @@ public class DefaultMainPass implements MainPass {
             VRenderSystem.setClearColor(cr, cg, cb, ca);
             Renderer.getInstance().endRenderPass(commandBuffer);
 
-            this.scaledFramebuffer.beginRenderPass(commandBuffer, this.auxRenderPass, stack);
+            this.scaledFramebuffer.beginRenderPass(
+                    commandBuffer, auxRenderPassFor(this.scaledFramebuffer), stack);
             Renderer.setViewportScale(this.swapChain.getWidth(), this.swapChain.getHeight());
         }
     }
@@ -770,15 +983,80 @@ public class DefaultMainPass implements MainPass {
 
     private void blitToSwapchain() {
         updateVsrState();
+        presentToSwapchain(this.mainFramebuffer.getColorAttachment());
+    }
+
+    /**
+     * Puts one finished image on the screen through the engine's own present path: the upscaler's
+     * state, the two slots it samples beside the picture, and the blit that knows the swapchain's
+     * channel order, its colour space and its orientation.
+     */
+    private void presentToSwapchain(VulkanImage image) {
+        VTextureSelector.bindTexture(0, image);
         VTextureSelector.bindTexture(1, VTextureSelector.getWhiteTexture());
         VTextureSelector.bindTexture(2, VTextureSelector.getWhiteTexture());
         DrawUtil.blitVsrToScreen();
     }
 
+    /**
+     * Which of the post paths took the frame, said once per session. A pack whose chain draws
+     * nothing leaves the world to the engine, and the frame is then composited by whichever resolver
+     * claims it first; a half resolution light target from that resolver is a dark band at distance
+     * that looks like a fault in the terrain.
+     */
+    private boolean reportedPostPath;
+    private boolean reportedChainHeld;
+    private boolean reportedWorldTarget;
+
+    /** The present for a pass that produced its own picture, rather than the engine's target. */
+    /**
+     * Probe, not a feature: when true the chain's presenter puts the engine's own finished picture on
+     * the screen instead of the pack's buffer. A picture that is right proves the presenter and the
+     * swapchain path and puts the fault inside the pack's last pass; a black one proves the opposite.
+     * Set back to false once the answer is in. This is the only way to tell the two apart without
+     * reading pixels back, since both failures look exactly alike on screen.
+     */
+    private static final boolean PRESENT_SCENE_PROBE = false;
+    private boolean reportedProbe;
+
+    private java.util.function.Consumer<VulkanImage> imagePresenter(VkCommandBuffer commandBuffer, MemoryStack stack) {
+        return image -> {
+            VulkanImage presented = image;
+
+            if (PRESENT_SCENE_PROBE) {
+                presented = this.mainFramebuffer.getColorAttachment();
+
+                if (!this.reportedProbe) {
+                    this.reportedProbe = true;
+                    Initializer.LOGGER.info("Vitrail: probe: presenting the engine's scene instead of the chain's buffer");
+                }
+            }
+
+            this.swapChain.getColorAttachment().transitionImageLayout(stack, commandBuffer, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+            this.swapChain.beginRenderPass(commandBuffer, this.presentRenderPass, stack);
+            Renderer.clearViewportScale();
+            Renderer.resetViewport();
+            Renderer.resetScissor();
+            updateVsrState();
+            presentToSwapchain(presented);
+        };
+    }
+
     private void resolveScaledFramebufferToSwapchain(VkCommandBuffer commandBuffer, boolean keepRendering) {
         try (MemoryStack stack = MemoryStack.stackPush()) {
-            this.mainFramebuffer.getColorAttachment().transitionImageLayout(stack, commandBuffer, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-            if (this.scaledFramebuffer != null && this.scaledFramebuffer.getColorAttachment2() != null) {
+            // Every colour attachment, not only the first. When a pack draws the world, this
+            // framebuffer is the chain's own and carries one attachment per buffer the pack's
+            // geometry pass writes. One left in the attachment layout and sampled by the chain's
+            // next pass reads as nothing: the world then arrives with no normals at all and is lit
+            // flat, while its colour — attachment zero, the only one switched here before — arrives
+            // intact, which is what makes the fault look like a shader problem instead of a layout.
+            for (int i = 0; i < this.mainFramebuffer.getColorAttachmentCount(); i++) {
+                this.mainFramebuffer.getColorAttachment(i).transitionImageLayout(
+                        stack, commandBuffer, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+            }
+
+            if (this.scaledFramebuffer != null && this.scaledFramebuffer != this.mainFramebuffer
+                    && this.scaledFramebuffer.getColorAttachment2() != null) {
                 this.scaledFramebuffer.getColorAttachment2().transitionImageLayout(stack, commandBuffer, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
             }
 
@@ -801,6 +1079,15 @@ public class DefaultMainPass implements MainPass {
     }
 
     private void resolvePostShader(VkCommandBuffer commandBuffer, MemoryStack stack, boolean keepRendering) {
+        // The snapshot the world's own clear could not take, because it arrived with the world's pass
+        // still recording. Here that pass is closed, so it can: same image, same conversion, and the
+        // chain gets the depth it needs to run at all.
+        if (this.capturedWorldDepth == null && this.worldDepthSnapshotPending
+                && Renderer.getInstance().getBoundRenderPass() == null) {
+            this.worldDepthSnapshotPending = false;
+            this.capturedWorldDepth = snapshotScaledDepth(this.capturedWorldDepth);
+        }
+
         VulkanImage worldDepth = null;
         VulkanImage fgDepth = null;
         if (this.capturedWorldDepth != null) {
@@ -811,6 +1098,17 @@ public class DefaultMainPass implements MainPass {
                 fgDepth = this.capturedForegroundDepth != null ? this.capturedForegroundDepth : this.capturedWorldDepth;
             }
         }
+        if (worldDepth == null && net.vulkanmod.vitrail.VitrailChain.drawsWorld()
+                && this.scaledFramebuffer != null) {
+            // While the pack draws the world, that world's depth never passes through the engine's own
+            // clear path, so the counter that drives the snapshot above never moves, no depth is ever
+            // captured, and the chain — which only runs once it has one — never ran at all. The pool
+            // was handed this very image as its depth attachment, so the frame's depth is already
+            // here, and it is complete now that the world's pass has been closed.
+            worldDepth = this.scaledFramebuffer.getDepthAttachment();
+            fgDepth = worldDepth;
+        }
+
         boolean depthShader = worldDepth != null;
         if (depthShader) {
             worldDepth.transitionImageLayout(stack, commandBuffer, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
@@ -822,14 +1120,40 @@ public class DefaultMainPass implements MainPass {
             return;
         }
 
+        // A pack reached through Vitrail is drawn by its chain and never by the two resolvers below:
+        // handing a vitrail selection to them composites the engine's drawing through a post path
+        // built for a pack that is not running, and its half resolution light target is the dark band
+        // that shows up past a few chunks.
         if (depthShader && !"radiance".equals(Initializer.CONFIG.selectedShader)
+                && !VitrailPacks.isSelection(Initializer.CONFIG.selectedShader)
                 && resolvePluginFrameGraph(commandBuffer, stack, keepRendering, worldDepth, fgDepth)) {
+            if (!this.reportedPostPath) {
+                this.reportedPostPath = true;
+                Initializer.LOGGER.info("Vitrail: post path: the plugin frame graph took the frame");
+            }
+
             return;
         }
 
         if (depthShader && !"radiance".equals(Initializer.CONFIG.selectedShader)
-                && resolveShaderPack(commandBuffer, stack, keepRendering, worldDepth, fgDepth)) {
+                && resolveVitrailChain(commandBuffer, stack, keepRendering, worldDepth, fgDepth)) {
             return;
+        }
+
+        if (depthShader && !"radiance".equals(Initializer.CONFIG.selectedShader)
+                && !VitrailPacks.isSelection(Initializer.CONFIG.selectedShader)
+                && resolveShaderPack(commandBuffer, stack, keepRendering, worldDepth, fgDepth)) {
+            if (!this.reportedPostPath) {
+                this.reportedPostPath = true;
+                Initializer.LOGGER.info("Vitrail: post path: the shader pack resolver took the frame");
+            }
+
+            return;
+        }
+
+        if (depthShader && !"radiance".equals(Initializer.CONFIG.selectedShader) && !this.reportedPostPath) {
+            this.reportedPostPath = true;
+            Initializer.LOGGER.info("Vitrail: post path: none took the frame, the engine's own drawing is presented");
         }
 
         this.swapChain.getColorAttachment().transitionImageLayout(stack, commandBuffer, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
@@ -850,15 +1174,33 @@ public class DefaultMainPass implements MainPass {
             case "scene" -> this.mainFramebuffer.getColorAttachment();
             case "depthtex" -> worldDepth;
             case "fgdepth" -> fgDepth;
-            case "shadowtex0" -> shadowsOn ? this.shadowMap.getCascadeDepthImage(0) : worldDepth;
-            case "shadowtex1" -> shadowsOn ? this.shadowMap.getCascadeDepthImage(1) : worldDepth;
-            case "shadowtex2" -> shadowsOn ? this.shadowMap.getCascadeDepthImage(2) : worldDepth;
+            // One map, the one the pack's own shadow matrices describe: shadowView() and
+            // shadowProjection() in VitrailGlobals are built from the cascade a pack is handed
+            // (ShadowMap.PACK_CASCADE), so a pack projecting through them and sampling another
+            // cascade would compare a depth against the wrong texel. It read as right by accident
+            // for as long as no scene had a sun shadow to place.
+            case "shadowtex0" -> shadowsOn ? this.shadowMap.getCascadeDepthImage(ShadowMap.PACK_CASCADE) : worldDepth;
+            case "shadowtex1" -> shadowsOn ? this.shadowMap.getCascadeDepthImage(ShadowMap.PACK_CASCADE) : worldDepth;
+            case "shadowtex2" -> shadowsOn ? this.shadowMap.getCascadeDepthImage(ShadowMap.PACK_CASCADE) : worldDepth;
+            // The colour the shadow pass kept for the same cascades. A pack multiplies the light by
+            // it, so a stained glass pane tints its own shadow; answering with white said the scene
+            // had no coloured caster at all, which is not the same as a scene that has none. The
+            // image is only filled when the engine's coloured shadow pass runs, and a null here is
+            // what leaves the caller on the white texel, with its name in the log.
+            case "shadowcolor0" -> coloredShadowsOn() ? this.shadowMap.getTintImage(ShadowMap.PACK_CASCADE) : null;
+            case "shadowcolor1" -> coloredShadowsOn() ? this.shadowMap.getTintImage(ShadowMap.PACK_CASCADE) : null;
             case "opaquedepth" -> this.capturedOpaqueDepth != null ? this.capturedOpaqueDepth : worldDepth;
             case "material" -> this.materialFramebuffer != null ? this.materialFramebuffer.getColorAttachment() : VTextureSelector.getWhiteTexture();
             case "gnormal" -> (this.scaledFramebuffer != null && this.scaledFramebuffer.getColorAttachment2() != null) ? this.scaledFramebuffer.getColorAttachment2() : worldDepth;
             case "materialdepth" -> this.materialFramebuffer != null ? this.materialFramebuffer.getDepthAttachment() : worldDepth;
             default -> null;
         };
+    }
+
+    /** Whether the engine's coloured shadow pass ran this frame, which is what fills the tint images. */
+    private boolean coloredShadowsOn() {
+        return Initializer.CONFIG.coloredShadows && Initializer.CONFIG.shadowsEnabled
+                && this.shadowMap.isReady();
     }
 
     private Runnable presentBeginCallback(VkCommandBuffer commandBuffer, MemoryStack stack) {
@@ -968,6 +1310,89 @@ public class DefaultMainPass implements MainPass {
         return true;
     }
 
+    /**
+     * Runs an OptiFine-format pack through Vitrail's chain: the pack's own {@code composite*} and
+     * {@code final} programs, over the world this engine has just drawn.
+     */
+    private boolean resolveVitrailChain(VkCommandBuffer commandBuffer, MemoryStack stack, boolean keepRendering,
+                                        VulkanImage worldDepth, VulkanImage fgDepth) {
+        // The same answer the adoption above asks, and for the same reason: a frame is the world's
+        // only when a level is up, no screen is open and the loading overlay is gone.
+        if (!worldFrameActive()) {
+            if (!this.reportedChainHeld) {
+                Minecraft minecraft = Minecraft.getInstance();
+                this.reportedChainHeld = true;
+                Initializer.LOGGER.info("Vitrail: chain held, level={} screen={} overlay={}",
+                        minecraft.level != null, minecraft.screen, minecraft.getOverlay());
+            }
+
+            return false;
+        }
+
+        String selection = Initializer.CONFIG.selectedShader;
+
+        if (!VitrailPacks.isSelection(selection)) {
+            return false;
+        }
+
+        Path pack = VitrailPacks.path(VitrailPacks.idOf(selection));
+
+        if (pack == null) {
+            return false;
+        }
+
+        // The pack's own chain, drawn, instead of the hand-wired one: -Dvitrail.debug.draw=true.
+        // Everything below this branch is the chain that has been drawing since the port began.
+        if (net.vulkanmod.vitrail.VitrailDebug.DRAW) {
+            net.vulkanmod.vitrail.VitrailPackChain drawn = net.vulkanmod.vitrail.VitrailPackChain.drawing(
+                    pack, VitrailChain.dimensionFolder(),
+                    this.mainFramebuffer.getWidth(), this.mainFramebuffer.getHeight());
+
+            if (!drawn.drawable()) {
+                return false;
+            }
+
+            // The pack's shadow map, drawn over the same mesh the engine casts from. Installed
+            // here because this is where the pack is known; it draws from the next frame on.
+            net.vulkanmod.vitrail.VitrailShadow.installed(pack, VitrailChain.dimensionFolder());
+
+            Renderer.getInstance().endRenderPass(commandBuffer);
+
+            boolean ran = drawn.drawFrame(commandBuffer, stack, this.mainFramebuffer.getColorAttachment(),
+                    name -> resolveEngineResource(name, worldDepth, fgDepth),
+                    imagePresenter(commandBuffer, stack));
+
+            if (!ran) return false;
+            if (!keepRendering) Renderer.getInstance().endRenderPass(commandBuffer);
+
+            return true;
+        }
+
+        VitrailChain chain = VitrailChain.of(pack);
+
+        if (!chain.ready()
+                || !chain.ensured(commandBuffer, stack, this.mainFramebuffer.getWidth(), this.mainFramebuffer.getHeight())) {
+            return false;
+        }
+
+        // The chain reads the picture the engine has just drawn, and the engine's pass over that
+        // picture must be closed before it does: an image that is still a colour attachment of an
+        // open render pass samples as nothing here, and the pack's last pass writes that nothing to
+        // the screen. That is the black world with the interfaces over it — a menu holds the chain,
+        // the engine presents its own drawing again, and the world shows through the menu.
+        Renderer.getInstance().endRenderPass(commandBuffer);
+
+        boolean ran = chain.runFrame(commandBuffer, stack,
+                name -> resolveEngineResource(name, worldDepth, fgDepth),
+                imagePresenter(commandBuffer, stack));
+
+        if (!ran) return false;
+        if (!keepRendering)
+            Renderer.getInstance().endRenderPass(commandBuffer);
+
+        return true;
+    }
+
     @Override
     public FrameGraphImpl getFrameGraph() {
         return this.frameGraph;
@@ -975,13 +1400,28 @@ public class DefaultMainPass implements MainPass {
 
     @Override
     public void onDepthClear(Framebuffer framebuffer) {
-        if (!postShaderActive() || framebuffer != this.scaledFramebuffer || !isUsingScaledFramebuffer()) {
+        if (!postShaderActive() || !carriesWorldDepth(framebuffer) || !isUsingScaledFramebuffer()) {
             return;
         }
         this.scaledDepthClears++;
         if (this.scaledDepthClears == 2) {
             net.vulkanmod.vulkan.VRenderSystem.captureWorldReconstruction();
-            this.capturedWorldDepth = snapshotScaledDepth(this.capturedWorldDepth);
+
+            // Only with no pass bound: the snapshot copies through an auxiliary render pass of its
+            // own, and beginning one while the world's pass is still recording is an invalid driver
+            // call — it was an access violation inside igvk64, straight out of this line. When the
+            // world is drawn into the pack's buffers, the clear arrives with that pass bound and the
+            // snapshot is skipped; the chain is handed the live depth image instead, in
+            // resolvePostShader, which is the same image the snapshot would have copied.
+            // Deferred, not dropped: by the end of the frame the pass holding this depth is closed,
+            // and that is the only state this copy may run in. Beginning an auxiliary pass inside the
+            // world's own pass is the invalid call that crashed the driver; skipping the copy outright
+            // leaves the chain without a depth and the frame goes back to vanilla.
+            if (Renderer.getInstance().getBoundRenderPass() == null) {
+                this.capturedWorldDepth = snapshotScaledDepth(this.capturedWorldDepth);
+            } else {
+                this.worldDepthSnapshotPending = true;
+            }
         } else if (this.scaledDepthClears == 3) {
             this.liveDepthIsForeground = true;
         }
@@ -991,7 +1431,7 @@ public class DefaultMainPass implements MainPass {
     public boolean suppressDepthClear(Framebuffer framebuffer) {
         return postShaderActive()
                 && isUsingScaledFramebuffer()
-                && framebuffer == this.scaledFramebuffer
+                && carriesWorldDepth(framebuffer)
                 && this.scaledDepthClears >= 3;
     }
 
@@ -1037,7 +1477,7 @@ public class DefaultMainPass implements MainPass {
             target.transitionImageLayout(stack, commandBuffer, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
             src.transitionImageLayout(stack, commandBuffer, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
 
-            source.beginRenderPass(commandBuffer, this.auxRenderPass, stack);
+            source.beginRenderPass(commandBuffer, auxRenderPassFor(source), stack);
 
             if (isUsingScaledFramebuffer())
                 Renderer.setViewportScale(this.swapChain.getWidth(), this.swapChain.getHeight());

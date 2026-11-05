@@ -256,6 +256,16 @@ public abstract class Pipeline implements RenderPipeline {
         return imageDescriptors;
     }
 
+    /**
+     * Marks the descriptor sets as needing a rewrite, which the next bind performs.
+     * <p>
+     * A block bound by the shared uniform buffer keeps its address only while that buffer is not
+     * resized, and a block of a few hundred bytes per area does resize it: the sets written before
+     * the growth then describe a buffer that has been freed, and every stage drawn through them
+     * reads whatever that memory held. A pipeline whose images never change is never asked to
+     * rewrite itself, which is why this has to be asked for.
+     */
+
     public void bindDescriptorSets(VkCommandBuffer commandBuffer, int frame) {
         UniformBuffer uniformBuffer = Renderer.getDrawer().getUniformBuffer();
         this.descriptorSets[frame].bindSets(commandBuffer, uniformBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS);
@@ -285,6 +295,9 @@ public abstract class Pipeline implements RenderPipeline {
     }
 
     protected static class DescriptorSets {
+
+        /** Whether this set has reported its first uniform block, so the log says it once. */
+        private boolean probed;
         private final Pipeline pipeline;
         private int poolSize = 10;
         private long descriptorPool;
@@ -427,6 +440,14 @@ public abstract class Pipeline implements RenderPipeline {
                 if (boundUBs[i] == 0L && !loggedNullUBO) {
                     loggedNullUBO = true;
                     Initializer.LOGGER.warn("Null UBO buffer for pipeline {} binding {}", pipeline.name, ubo.getBinding());
+                }
+
+                if (!this.probed) {
+                    this.probed = true;
+                    Initializer.LOGGER.info("Vitrail: descriptor probe, {} binding {} buffer {} range {} "
+                            + "dynamic {} used {} pointer {}", pipeline.name, ubo.getBinding(),
+                            boundUBs[i], ubo.getSize(), this.dynamicOffsets.get(i),
+                            ub.getUsedBytes(), ub.getPointer());
                 }
 
                 bufferInfos[i] = VkDescriptorBufferInfo.calloc(1, stack);

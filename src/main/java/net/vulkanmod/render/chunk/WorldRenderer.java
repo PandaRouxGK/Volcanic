@@ -589,6 +589,14 @@ public class WorldRenderer {
 
         final java.util.List<RenderSection> cascadeSections = shadowSectionsForCascade(cascade, cascadeRadius);
 
+        // The frame the casters are drawn in is the frame the pack's block has to describe: the
+        // sun's matrices, the camera, the clocks. Filled once, before the first caster.
+        if (cascade == net.vulkanmod.vulkan.pass.ShadowMap.PACK_CASCADE) {
+            net.vulkanmod.vitrail.VitrailShadow.frame();
+        }
+
+        final int[] packSections = {0};
+
         try (RenderStateSnapshot snapshot = RenderStateSnapshot.capture()) {
             for (TerrainRenderType terrainRenderType : types) {
                 RenderType renderType = TerrainRenderType.getRenderType(terrainRenderType);
@@ -599,8 +607,29 @@ public class WorldRenderer {
                 VRenderSystem.depthFun = 515;
                 VRenderSystem.cull = (terrainRenderType == TerrainRenderType.SOLID);
 
-                RenderPipeline pipeline = pipelineManager.getPipeline(PipelineManager.ROLE_SHADOW_TERRAIN, terrainRenderType);
-                renderer.bindGraphicsPipeline(pipeline);
+                // The pack's own shadow program, when one is installed. It is drawn into the very
+                // cascade the pack's matrices describe, so the depth a composite pass compares
+                // against is the depth this pass wrote, and not a neighbouring cascade's.
+                RenderPipeline pipeline = cascade == net.vulkanmod.vulkan.pass.ShadowMap.PACK_CASCADE
+                        ? net.vulkanmod.vitrail.VitrailShadow.pipelineFor(terrainRenderType)
+                        : null;
+                final boolean packPipeline = pipeline != null;
+
+                if (pipeline == null) {
+                    pipeline = pipelineManager.getPipeline(PipelineManager.ROLE_SHADOW_TERRAIN, terrainRenderType);
+                }
+                final boolean bound = renderer.bindGraphicsPipeline(pipeline);
+
+                // The pack's own stage can be installed and still bind to nothing: a handle that
+                // did not build comes back as zero and this returns false without a word, which
+                // leaves the previous pipeline bound and the map as the last pass left it.
+                if (packPipeline && cascadeSections.size() > 0
+                        && net.vulkanmod.vitrail.VitrailShadow.reportBinding(bound, terrainRenderType,
+                        cascadeSections.size())) {
+                    net.vulkanmod.Initializer.LOGGER.info(
+                            "Vitrail: pack shadow bind, {} bound={} sections={} cascade={}",
+                            terrainRenderType, bound, cascadeSections.size(), cascade);
+                }
                 VTextureSelector.bindShaderTextures(pipeline);
                 terrainRenderType.setCutoutUniform();
 
@@ -624,6 +653,7 @@ public class WorldRenderer {
                         }
 
                         this.shadowScratchQueue.add(s);
+                        if (packPipeline) packSections[0]++;
                     }
 
                     flushShadowArea(curArea, terrainRenderType, pipeline, renderer, shadowIndirect, camX, camY, camZ);
@@ -646,6 +676,7 @@ public class WorldRenderer {
                         }
 
                         drawBuffers.drawSingleSection(s, terrainRenderType);
+                        if (packPipeline) packSections[0]++;
                     }
                 }
                 renderType.clearRenderState();
@@ -653,6 +684,10 @@ public class WorldRenderer {
 
             if (indirectDraw)
                 shadowIndirect.submitUploads();
+
+            if (cascade == net.vulkanmod.vulkan.pass.ShadowMap.PACK_CASCADE) {
+                net.vulkanmod.vitrail.VitrailShadow.noteDraws(packSections[0]);
+            }
 
             VRenderSystem.setChunkOffset(0, 0, 0);
             renderer.pushConstants(pipelineManager.getPipeline(PipelineManager.ROLE_SHADOW_TERRAIN, TerrainRenderType.SOLID));

@@ -19,6 +19,12 @@ import java.util.Map;
 public class PackLoader {
 
     public static ShaderPack load(String id) {
+        // A Vitrail pack is an OptiFine program set, not one of this loader's JSON manifests, and
+        // its id carries a colon that the shaderpacks lookup below rejects as a path character.
+        if (net.vulkanmod.vitrail.VitrailPacks.isSelection(id)) {
+            return null;
+        }
+
         ShaderPacks.ensureBuiltins();
         try {
             Path external = ShaderPacks.file(id, "pack.json");

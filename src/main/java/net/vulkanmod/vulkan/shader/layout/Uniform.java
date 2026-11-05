@@ -44,6 +44,16 @@ public class Uniform {
     }
 
     void update(long ptr) {
+        if (this.values == null) {
+            // A field nothing supplies keeps nought. The caller's buffer comes from the stack and is
+            // not zeroed, so leaving it untouched would push whatever was there into the shader; and
+            // a push constant block the engine's own layout leaves unset used to be a crash here,
+            // because the field was written by a consumer that only ever received the fields the
+            // engine knows by name.
+            MemoryUtil.memSet(ptr + this.offset, 0, this.size);
+            return;
+        }
+
         MappedBuffer src = values.get();
 
         MemoryUtil.memCopy(src.ptr, ptr + this.offset, this.size);

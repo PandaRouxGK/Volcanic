@@ -35,12 +35,22 @@ public abstract class ImageUtil {
     }
 
     public static void downloadTexture(VulkanImage image, long ptr) {
+        downloadTexture(image, ptr, Long.MAX_VALUE);
+    }
+
+    /**
+     * Reads the image back into {@code ptr}, never writing more than {@code destCapacity} bytes.
+     * The destination is often a {@link NativeImage} buffer sized for four bytes per pixel, which can be
+     * smaller than the source (an RGBA16F attachment keeps eight), and overflowing it killed the JVM.
+     */
+    public static void downloadTexture(VulkanImage image, long ptr, long destCapacity) {
         try (MemoryStack stack = stackPush()) {
             int prevLayout = image.getCurrentLayout();
             CommandPool.CommandBuffer commandBuffer = DeviceManager.getGraphicsQueue().beginCommands();
             image.transitionImageLayout(stack, commandBuffer.getHandle(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
 
             long imageSize = (long) image.width * image.height * image.formatSize;
+            long copySize = Math.min(imageSize, Math.max(destCapacity, 0L));
 
             LongBuffer pStagingBuffer = stack.mallocLong(1);
             PointerBuffer pStagingAllocation = stack.pointers(0L);
@@ -59,7 +69,7 @@ public abstract class ImageUtil {
             vkWaitForFences(DeviceManager.vkDevice, fence, true, VUtil.UINT64_MAX);
 
             MemoryManager.MapAndCopy(pStagingAllocation.get(0),
-                    (data) -> VUtil.memcpy(data.getByteBuffer(0, (int) imageSize), ptr)
+                    (data) -> VUtil.memcpy(data.getByteBuffer(0, (int) copySize), ptr)
             );
 
             MemoryManager.freeBuffer(pStagingBuffer.get(0), pStagingAllocation.get(0));
@@ -67,13 +77,22 @@ public abstract class ImageUtil {
     }
 
     public static void copyImageToBuffer(VkCommandBuffer commandBuffer, long buffer, long image, int mipLevel, int width, int height, int xOffset, int yOffset, int bufferOffset, int bufferRowLenght, int bufferImageHeight) {
+        copyImageToBuffer(commandBuffer, buffer, image, mipLevel, width, height, xOffset, yOffset,
+                bufferOffset, bufferRowLenght, bufferImageHeight, VK_IMAGE_ASPECT_COLOR_BIT);
+    }
+
+    /**
+     * The same copy from an image whose aspect is not colour: a shadow map is depth, and a copy that
+     * names the colour aspect of a depth only image copies nothing at all.
+     */
+    public static void copyImageToBuffer(VkCommandBuffer commandBuffer, long buffer, long image, int mipLevel, int width, int height, int xOffset, int yOffset, int bufferOffset, int bufferRowLenght, int bufferImageHeight, int aspectMask) {
         try (MemoryStack stack = stackPush()) {
 
             VkBufferImageCopy.Buffer region = VkBufferImageCopy.calloc(1, stack);
             region.bufferOffset(bufferOffset);
             region.bufferRowLength(bufferRowLenght);
             region.bufferImageHeight(bufferImageHeight);
-            region.imageSubresource().aspectMask(VK_IMAGE_ASPECT_COLOR_BIT);
+            region.imageSubresource().aspectMask(aspectMask);
             region.imageSubresource().mipLevel(mipLevel);
             region.imageSubresource().baseArrayLayer(0);
             region.imageSubresource().layerCount(1);

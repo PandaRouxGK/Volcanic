@@ -11,7 +11,15 @@ import net.vulkanmod.vulkan.shader.descriptor.ImageDescriptor;
 import java.nio.ByteBuffer;
 
 public abstract class VTextureSelector {
-    public static final int SIZE = 12;
+    /**
+     * One slot per texture unit, plus room past them.
+     * <p>
+     * The engine's own pipelines use the first twelve and nothing here assumes the end. A pack's
+     * screen passes can declare far more samplers than that — this one's {@code composite4} declares
+     * nineteen — and a slot array that stops at twelve forces every one past it onto a single shared
+     * slot, where each binding overwrites the last.
+     */
+    public static final int SIZE = 32;
 
     private static final VulkanImage[] boundTextures = new VulkanImage[SIZE];
 
