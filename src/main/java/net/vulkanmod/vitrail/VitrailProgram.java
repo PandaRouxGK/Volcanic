@@ -336,8 +336,10 @@ final class VitrailProgram {
         }
 
         // Which end of the pack's own mix the terrain sits at: the sun taken as fully lit, against
-        // the sun gated by the map. The two numbers say what the map answers and how much the sun
-        // is worth in the picture.
+        // the sun gated by the map. Measured at the reference pose, colortex0 as the pack writes it
+        // is (0.4120, 0.5027, 0.5877); fully lit it is (0.4130, 0.5046, 0.5885) and fully shadowed
+        // (0.4137, 0.5058, 0.5883). The occlusion is worth two tenths of a percent of that buffer,
+        // which is what makes every A/B of the shadow map look like nothing happened.
         String mix = "vec3 sceneLighting = mix(ambientCol * lightmap.y, lightCol, fullShadow * shadowMult);";
 
         if (Boolean.getBoolean("vitrail.debug.sunlit") && fragment.contains(mix)) {
