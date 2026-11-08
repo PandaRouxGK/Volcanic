@@ -127,6 +127,9 @@ public final class VitrailPackChain implements AutoCloseable {
     private boolean reportedFeedback;
     private int passesDrawn;
     private int framesDrawn;
+    /** The stages a blend was turned off for, said once each. */
+    private static final java.util.Set<String> BLEND_SAID = java.util.concurrent.ConcurrentHashMap.newKeySet();
+
     private int probeReports;
 
     /** The pack's own {@code final}, and the image of the screen's size it writes. */
@@ -734,7 +737,23 @@ public final class VitrailPackChain implements AutoCloseable {
 
             stage.pass().beginLoaded(commandBuffer, stack);
             bind(stage, engine);
+            // A pack's stage writes its outputs as the pack authored them. The engine's blend is
+            // the state of whatever the frame drew before this stage, and a stage that inherits it
+            // writes a fraction of what it computed; blending is the engine's, never the pack's.
+            boolean blended = net.vulkanmod.vulkan.shader.PipelineState.blendInfo.enabled;
+
+            if (blended && BLEND_SAID.add(stage.name())) {
+                net.vulkanmod.Initializer.LOGGER.info(
+                        "Vitrail: '{}' was about to draw with the engine's blend on", stage.name());
+            }
+
+            net.vulkanmod.vulkan.VRenderSystem.disableBlend();
+
             stage.pass().drawFullscreen(stage.pipeline());
+
+            if (blended) {
+                net.vulkanmod.vulkan.VRenderSystem.enableBlend();
+            }
             stage.pass().end(commandBuffer);
             drawn++;
         }
