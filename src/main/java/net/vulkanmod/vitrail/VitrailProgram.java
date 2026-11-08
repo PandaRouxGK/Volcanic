@@ -281,7 +281,7 @@ final class VitrailProgram {
         if (!VitrailDebug.SHADOW_PROBE && !VitrailDebug.SUN_FIXED
                 && !Boolean.getBoolean("vitrail.debug.shadowzero")
                 && !Boolean.getBoolean("vitrail.debug.sunlit")
-                && !VitrailDebug.LIGHT_PROBE) {
+                && !VitrailDebug.LIGHT_PROBE && !VitrailDebug.DEPTH_PROBE) {
             return bound;
         }
 
@@ -375,6 +375,27 @@ final class VitrailProgram {
             if (changed) {
                 Initializer.LOGGER.info(
                         "Vitrail: '{}' answers its first target with (lighting, sun term, shadow factor)",
+                        name);
+            }
+        }
+
+        // What the pack reads for depth, answered in place of what it computed. A pass that
+        // linearises a sample it believes is a window depth turns nought into the near plane, and
+        // every occluder test built on it then finds the camera's own surface in front of itself.
+        if (VitrailDebug.DEPTH_PROBE) {
+            String aoWrite = "ofFragData0 = vec4(ao, 0.0, 0.0, 0.0);";
+
+            if (fragment.contains(aoWrite) && fragment.contains("float z = textureLod(depthtex0")) {
+                // The control arm. A capture that reports the far plane everywhere is one bad
+                // binding away from being a capture of a probe that never ran, so the same path is
+                // asked for a constant and must come back holding it.
+                boolean control = Boolean.getBoolean("vitrail.debug.depthprobe.control");
+                fragment = fragment.replace(aoWrite, "ofFragData0 = vec4("
+                        + (control ? "0.5" : "z") + ", 0.0, 0.0, 0.0);");
+                changed = true;
+                Initializer.LOGGER.info(control
+                                ? "Vitrail: '{}' answers its own target with the constant half"
+                                : "Vitrail: '{}' answers its own target with the depth it read",
                         name);
             }
         }

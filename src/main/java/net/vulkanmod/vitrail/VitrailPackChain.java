@@ -142,6 +142,21 @@ public final class VitrailPackChain implements AutoCloseable {
     private boolean noiseUploaded;
 
     /** What the last drawn frame really bound, as opposed to what the plan could serve. */
+    /**
+     * Which half of the ping-pong the probe reads, {@code -Dvitrail.debug.probe.side=alt} for the
+     * other one.
+     * <p>
+     * The plan writes one side and the next frame reads the other, so a capture that reads a fixed
+     * side reports the half nothing wrote. It did: at the reference pose with the whole chain drawn,
+     * five of the eight buffers read back exactly nought while the presented image was the pack's
+     * own picture of the same frame, which no chain can produce from nought. The side is a
+     * diagnostic setting, not a preference: an A/B of a buffer is only an A/B of that buffer when
+     * the side is the one written.
+     */
+    private static final TargetSchedule.Side PROBE_SIDE =
+            "alt".equals(System.getProperty("vitrail.debug.probe.side"))
+                    ? TargetSchedule.Side.ALT : TargetSchedule.Side.MAIN;
+
     private int boundServed;
     private int boundWhite;
     private final List<String> whiteNames = new ArrayList<>();
@@ -171,6 +186,16 @@ public final class VitrailPackChain implements AutoCloseable {
      * of texels below white is the number that tells the two apart, and the mean alone cannot.
      */
     private ReadbackBuffer tintProbe;
+
+    /**
+     * The depth {@code depthtex0} is answered with, read back because nought and unfilled look alike.
+     * <p>
+     * A stage that linearises this image turns the far plane into "no geometry here", so a chain
+     * handed a cleared depth draws a frame in which every fragment is sky: its occlusion term comes
+     * out at one everywhere, its fog measures distance to nothing, and the picture can still look
+     * plausible because the pack's geometry stage never reads depth at all.
+     */
+    private ReadbackBuffer depthProbe;
 
     /**
      * Every colour buffer of the chain, read back beside the frame the same way.
@@ -820,7 +845,8 @@ public final class VitrailPackChain implements AutoCloseable {
         GpuTexture shown = showedFinal ? this.presentation : lastPass;
 
         if (shown != null) {
-            probe(shown, lastPass, scene, commandBuffer, stack);
+            probe(shown, lastPass, scene, engine != null ? engine.apply("depthtex") : null,
+                    commandBuffer, stack);
             present.accept(shown.image());
         }
 
@@ -899,7 +925,7 @@ public final class VitrailPackChain implements AutoCloseable {
      * Four bytes a texel, which is the packed eight bit form every buffer of the corpus ends on.
      */
     private void probe(GpuTexture shown, GpuTexture previous, VulkanImage scene,
-                       VkCommandBuffer commandBuffer, MemoryStack stack) {
+                       VulkanImage depthAnswer, VkCommandBuffer commandBuffer, MemoryStack stack) {
         if (!VitrailDebug.PROBES || this.probeReports >= PROBE_REPORTS
                 || this.framesDrawn < PROBE_SETTLED_FRAME) {
             return;
@@ -914,10 +940,13 @@ public final class VitrailPackChain implements AutoCloseable {
         VulkanImage tint = tintMap();
         int tintBytes = tint == null ? 0 : tint.width * tint.height * 4;
 
+        VulkanImage worldDepth = depthAnswer;
+        int depthBytes = worldDepth == null ? 0 : worldDepth.width * worldDepth.height * 4;
+
         List<Map.Entry<Integer, GpuTexture>> buffers = new ArrayList<>();
 
         for (Map.Entry<Integer, GpuTexture[]> entry : this.targets.entrySet()) {
-            GpuTexture texture = textureFor(entry.getKey(), TargetSchedule.Side.MAIN);
+            GpuTexture texture = textureFor(entry.getKey(), PROBE_SIDE);
 
             if (texture != null) {
                 buffers.add(Map.entry(entry.getKey(), texture));
@@ -931,6 +960,7 @@ public final class VitrailPackChain implements AutoCloseable {
                     : null;
             this.shadowProbe = shadowBytes > 0 ? new ReadbackBuffer(shadowBytes) : null;
             this.tintProbe = tintBytes > 0 ? new ReadbackBuffer(tintBytes) : null;
+            this.depthProbe = depthBytes > 0 ? new ReadbackBuffer(depthBytes) : null;
             for (Map.Entry<Integer, GpuTexture> buffer : buffers) {
                 VulkanImage target = buffer.getValue().image();
                 GpuFormat format = gpuFormatOf(target.format);
@@ -997,6 +1027,17 @@ public final class VitrailPackChain implements AutoCloseable {
                 MemoryUtil.memFree(tinted);
             }
 
+            if (this.depthProbe != null) {
+                ByteBuffer depths = this.depthProbe.copyOut();
+
+                Initializer.LOGGER.info("Vitrail: pack chain probe, frame {} the world depth {}x{} fmt=0x{}, {}",
+                        this.framesDrawn - 1, worldDepth.width, worldDepth.height,
+                        Integer.toHexString(worldDepth.format),
+                        shadowStats(depths, worldDepth.width * worldDepth.height));
+
+                MemoryUtil.memFree(depths);
+            }
+
             for (Map.Entry<Integer, GpuTexture> buffer : buffers) {
                 ReadbackBuffer read = this.targetProbes.get(buffer.getKey());
 
@@ -1059,6 +1100,11 @@ public final class VitrailPackChain implements AutoCloseable {
                 this.tintProbe = null;
             }
 
+            if (this.depthProbe != null) {
+                this.depthProbe.freeBuffer();
+                this.depthProbe = null;
+            }
+
             for (ReadbackBuffer read : this.targetProbes.values()) {
                 read.freeBuffer();
             }
@@ -1088,6 +1134,13 @@ public final class VitrailPackChain implements AutoCloseable {
             ImageUtil.copyImageToBuffer(commandBuffer, this.shadowProbe.getId(), shadow.getId(), 0,
                     shadow.width, shadow.height, 0, 0, 0, 0, 0, VK_IMAGE_ASPECT_DEPTH_BIT);
             shadow.transitionImageLayout(stack, commandBuffer, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        }
+
+        if (this.depthProbe != null) {
+            worldDepth.transitionImageLayout(stack, commandBuffer, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+            ImageUtil.copyImageToBuffer(commandBuffer, this.depthProbe.getId(), worldDepth.getId(), 0,
+                    worldDepth.width, worldDepth.height, 0, 0, 0, 0, 0, VK_IMAGE_ASPECT_DEPTH_BIT);
+            worldDepth.transitionImageLayout(stack, commandBuffer, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
         }
 
         if (this.tintProbe != null) {

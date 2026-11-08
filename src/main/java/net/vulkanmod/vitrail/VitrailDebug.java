@@ -103,6 +103,19 @@ public final class VitrailDebug {
     public static final boolean LIGHT_PROBE = ENABLED && Boolean.getBoolean("vitrail.debug.lightprobe");
 
     /**
+     * Answers a chain stage's target with the depth it reads instead of what it computed:
+     * {@code -Dvitrail.debug.depthprobe=true}.
+     * <p>
+     * BSL's deferred stage samples {@code depthtex0} once, calls that {@code z}, and linearises it
+     * through {@code gbufferProjectionInverse} for its ambient occlusion. Read back at the reference
+     * pose, that stage's own target holds nought in every texel, the sky included, where the pack
+     * starts its occlusion term at one and never touches it — a value the pack's code cannot produce
+     * unless the depth it was handed is nought. This probe replaces the answer with {@code z} itself,
+     * so one capture says whether the buffer is wrong or the sample is.
+     */
+    public static final boolean DEPTH_PROBE = ENABLED && Boolean.getBoolean("vitrail.debug.depthprobe");
+
+    /**
      * Runs only the first few passes of the chain: {@code -Dvitrail.debug.chain.limit=0}.
      *
      * <p>nought or more leaves that many of the pack's own passes undrawn and skips the final one;

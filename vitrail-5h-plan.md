@@ -118,6 +118,42 @@ la distance via la matrice inverse, comparaison aux distances mesurées en jeu.
 **Livrable :** le test lui-même, réutilisable comme garde-fou avant chaque futur changement de
 matrice.
 
+### Bloc 3 — exécuté le 2026-11-08 à 18:57, et il a trouvé un vrai défaut
+
+Ce bloc a commencé par un piège de mesure. `deferred` écrit son AO dans **colortex4**
+(`DRAWBUFFERS:4`), et cette cible se lisait à zéro. Or cinq des huit buffers se lisaient à zéro
+alors que l'image présentée était correcte — ce qu'aucune chaîne ne peut produire à partir de
+zéro. La sonde lisait donc **la mauvaise moitié du ping-pong**. Corrigé : `-Dvitrail.debug.probe.side=alt`.
+
+**Conséquence à retenir :** toute moyenne de buffer de chaîne lue avant ce correctif est suspecte,
+sauf les runs à `chain.limit=0`, où aucune passe n'écrit et où la face lue est forcément la bonne.
+
+Ensuite, la profondeur, mesurée deux fois indépendamment :
+
+| mesure | résultat |
+|---|---|
+| `z = textureLod(depthtex0, ...)` relu dans la cible du pack | **1,0000 sur tous les texels** |
+| même chemin avec un témoin forcé à 0,5 | **0,5020** — la sonde est vivante |
+| image de profondeur lue directement | 854×480, `fmt=0x7e` (D32), **0 caster sur 409 920, 1,0 partout** |
+| AO que le pack en déduit (colortex4) | 1,0 partout, ciel et sol confondus |
+
+**Le défaut :** la profondeur que reçoit la chaîne est **vide**. Ce n'est pas un problème de lien
+ni de format, c'est la mauvaise image : `adoptWorldTarget` passe `scaledFramebuffer` comme tampon de
+profondeur au framebuffer où le monde est dessiné, et cette image reste au plan lointain — donc le
+pack ne voit aucune géométrie nulle part.
+
+**Ce que cela éteint dans BSL, sans aucun symptôme visible :** l'occlusion ambiante (AO = 1
+partout), la distance de brouillard, la profondeur de champ, les volumétriques, et la séparation
+ciel/géométrie. La géométrie du pack ne lit pas la profondeur, donc l'image peut rester plausible.
+C'est exactement le type de panne que les moyennes de frame ne montrent pas.
+
+**Livré :** la sonde de profondeur (image lue directement), le sélecteur de face du ping-pong, et la
+sonde `z` dans le shader de la passe qui la consomme, témoin compris.
+
+**Reste ouvert, et c'est la suite :** établir si la passe monde du pack écrit la profondeur du tout
+(test et attachement), puis alimenter la chaîne avec l'image que le monde a réellement écrite. Tant
+que ce n'est pas fait, aucun effet dépendant de la profondeur ne peut être jugé correct ou incorrect.
+
 ## Bloc 4 — 21:05 → 21:55 · Qui occupe vraiment l'écran
 
 **Objectif :** répondre chiffré à « quelle part de l'image chaque stage possède », ce qui conditionne
