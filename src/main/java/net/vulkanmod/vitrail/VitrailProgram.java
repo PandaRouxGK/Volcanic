@@ -254,9 +254,10 @@ final class VitrailProgram {
         }
 
         String target = "ofFragData" + channel;
+        String value = System.getProperty("vitrail.debug.attachvalue", "0.5, 0.6, 0.7, 0.8");
         String text = bound.fragment();
         String replaced = text.replaceAll(target + "\s*=\s*[^;]*;",
-                target + " = vec4(0.5, 0.6, 0.7, 0.8);");
+                target + " = vec4(" + value + ");");
 
         if (replaced.equals(text)) {
             return bound;
