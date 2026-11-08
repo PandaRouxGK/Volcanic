@@ -52,6 +52,10 @@ import java.util.Map;
  */
 public final class VitrailWorld implements AutoCloseable {
 
+    /** The render types the terrain has asked a pipeline for, said once each. */
+    private static final java.util.Set<Object> FIT_SAID = java.util.concurrent.ConcurrentHashMap.newKeySet();
+    private static final java.util.Set<String> ASKED = java.util.concurrent.ConcurrentHashMap.newKeySet();
+
     /** The world's geometry pass currently installed, or null when the engine draws the world. */
     private static VitrailWorld active;
     private static String installedKey;
@@ -275,6 +279,11 @@ public final class VitrailWorld implements AutoCloseable {
      * water stage reads buffers this draw cannot feed yet.
      */
     public static GraphicsPipeline pipelineFor(TerrainRenderType type) {
+        if (VitrailDebug.ENABLED && ASKED.add(type.name())) {
+            net.vulkanmod.Initializer.LOGGER.info("Vitrail: the terrain asks for its '{}' pipeline",
+                    type.name());
+        }
+
         VitrailWorld world = active;
 
         if (!PACK_WORLD || world == null) {
@@ -294,7 +303,16 @@ public final class VitrailWorld implements AutoCloseable {
             return null;
         }
 
-        return fits(pipeline) ? pipeline.pipeline() : null;
+        boolean fits = fits(pipeline);
+
+        if (VitrailDebug.ENABLED && FIT_SAID.add(pipeline) ) {
+            net.vulkanmod.Initializer.LOGGER.info(
+                    "Vitrail: the world's stage writes {} and the pass holds {} — {}",
+                    this.outputs.get(pipeline), this.targets, fits ? "drawn by the pack"
+                            : "the engine keeps it");
+        }
+
+        return fits ? pipeline.pipeline() : null;
     }
 
     /** Whether this program's outputs are the world framebuffer's prefix. */
