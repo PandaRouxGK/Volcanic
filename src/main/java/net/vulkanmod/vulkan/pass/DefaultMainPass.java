@@ -1196,6 +1196,13 @@ public class DefaultMainPass implements MainPass {
             // (ShadowMap.PACK_CASCADE), so a pack projecting through them and sampling another
             // cascade would compare a depth against the wrong texel. It read as right by accident
             // for as long as no scene had a sun shadow to place.
+            // All three are one image, and for a pack that is not a detail: BSL's SampleBasicShadow
+            // reads shadowtex1 inside its colour branch to decide whether the occluder let light
+            // through, and multiplying it by the tint of a texel it already knows is occluded gives
+            // nought. Measured on the reference pose, the tint is nought in 92.6% of the map, and
+            // that image is not wrong for this build: the product is nought either way, so a
+            // coloured caster tints nothing and darkens nothing. What the identity costs is the
+            // feature, not the picture — and it is why an unwritten tint has gone unnoticed.
             case "shadowtex0" -> shadowsOn ? this.shadowMap.getCascadeDepthImage(ShadowMap.PACK_CASCADE) : worldDepth;
             case "shadowtex1" -> shadowsOn ? this.shadowMap.getCascadeDepthImage(ShadowMap.PACK_CASCADE) : worldDepth;
             case "shadowtex2" -> shadowsOn ? this.shadowMap.getCascadeDepthImage(ShadowMap.PACK_CASCADE) : worldDepth;

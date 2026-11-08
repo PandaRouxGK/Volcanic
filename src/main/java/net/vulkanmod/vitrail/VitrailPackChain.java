@@ -163,6 +163,16 @@ public final class VitrailPackChain implements AutoCloseable {
     private ReadbackBuffer shadowProbe;
 
     /**
+     * The coloured shadow tint read back beside the map, because white and unwritten look alike.
+     * <p>
+     * The tint pass clears its target to white and multiplies a translucent caster's own colour into
+     * it, so white is the honest "no coloured caster reached this texel". An image no pass ever
+     * cleared holds whatever the allocator left, and a pack multiplies its shadow by it: the fraction
+     * of texels below white is the number that tells the two apart, and the mean alone cannot.
+     */
+    private ReadbackBuffer tintProbe;
+
+    /**
      * Every colour buffer of the chain, read back beside the frame the same way.
      * <p>
      * The presented image is the pack's after its exposure and its tone map, so a mean over it moves
@@ -901,6 +911,9 @@ public final class VitrailPackChain implements AutoCloseable {
         VulkanImage shadow = shadowMap();
         int shadowBytes = shadow == null ? 0 : shadow.width * shadow.height * 4;
 
+        VulkanImage tint = tintMap();
+        int tintBytes = tint == null ? 0 : tint.width * tint.height * 4;
+
         List<Map.Entry<Integer, GpuTexture>> buffers = new ArrayList<>();
 
         for (Map.Entry<Integer, GpuTexture[]> entry : this.targets.entrySet()) {
@@ -917,6 +930,7 @@ public final class VitrailPackChain implements AutoCloseable {
                     ? new ReadbackBuffer(bytes)
                     : null;
             this.shadowProbe = shadowBytes > 0 ? new ReadbackBuffer(shadowBytes) : null;
+            this.tintProbe = tintBytes > 0 ? new ReadbackBuffer(tintBytes) : null;
             for (Map.Entry<Integer, GpuTexture> buffer : buffers) {
                 VulkanImage target = buffer.getValue().image();
                 GpuFormat format = gpuFormatOf(target.format);
@@ -971,6 +985,16 @@ public final class VitrailPackChain implements AutoCloseable {
                         shadowStats(depths, shadow.width * shadow.height));
 
                 MemoryUtil.memFree(depths);
+            }
+
+            if (this.tintProbe != null) {
+                ByteBuffer tinted = this.tintProbe.copyOut();
+
+                Initializer.LOGGER.info("Vitrail: pack chain probe, frame {} the shadow tint {}x{} fmt=0x{}, {}",
+                        this.framesDrawn - 1, tint.width, tint.height,
+                        Integer.toHexString(tint.format), tintStats(tinted, tint.width * tint.height));
+
+                MemoryUtil.memFree(tinted);
             }
 
             for (Map.Entry<Integer, GpuTexture> buffer : buffers) {
@@ -1030,6 +1054,11 @@ public final class VitrailPackChain implements AutoCloseable {
                 this.shadowProbe = null;
             }
 
+            if (this.tintProbe != null) {
+                this.tintProbe.freeBuffer();
+                this.tintProbe = null;
+            }
+
             for (ReadbackBuffer read : this.targetProbes.values()) {
                 read.freeBuffer();
             }
@@ -1061,6 +1090,13 @@ public final class VitrailPackChain implements AutoCloseable {
             shadow.transitionImageLayout(stack, commandBuffer, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
         }
 
+        if (this.tintProbe != null) {
+            tint.transitionImageLayout(stack, commandBuffer, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+            ImageUtil.copyImageToBuffer(commandBuffer, this.tintProbe.getId(), tint.getId(), 0,
+                    tint.width, tint.height, 0, 0, 0, 0, 0);
+            tint.transitionImageLayout(stack, commandBuffer, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        }
+
         for (Map.Entry<Integer, GpuTexture> buffer : buffers) {
             ReadbackBuffer read = this.targetProbes.get(buffer.getKey());
 
@@ -1086,6 +1122,53 @@ public final class VitrailPackChain implements AutoCloseable {
         }
 
         return map.getCascadeDepthImage(net.vulkanmod.vulkan.pass.ShadowMap.PACK_CASCADE);
+    }
+
+    /**
+     * The image {@code shadowcolor0} is answered with, or null when the engine enables none.
+     * <p>
+     * The same cascade as the map, because a pack multiplies the two: a tint from one cascade and a
+     * depth from another would colour a shadow by whatever happened to be behind it.
+     */
+    private static VulkanImage tintMap() {
+        net.vulkanmod.vulkan.pass.ShadowMap map = net.vulkanmod.vulkan.pass.ShadowMap.active();
+
+        if (map == null || !map.isReady() || !Initializer.CONFIG.shadowsEnabled
+                || !Initializer.CONFIG.coloredShadows) {
+            return null;
+        }
+
+        return map.getTintImage(net.vulkanmod.vulkan.pass.ShadowMap.PACK_CASCADE);
+    }
+
+    /**
+     * What a coloured shadow tint holds: how much of it a caster coloured, and how much is black.
+     * <p>
+     * The pass clears to white and multiplies, so white is "no coloured caster here" and is the
+     * value that costs nothing. Black is the other end: a scene with no tint written and no clear
+     * reads black, and a pack multiplies its shadow by it, so every sunlit texel goes dark. The
+     * fraction below white is what tells an untouched tint from an unwritten one.
+     */
+    private static String tintStats(ByteBuffer read, int texels) {
+        int tinted = 0;
+        int black = 0;
+
+        for (int texel = 0; texel < texels; texel++) {
+            int r = read.get(texel * 4) & 0xFF;
+            int g = read.get(texel * 4 + 1) & 0xFF;
+            int b = read.get(texel * 4 + 2) & 0xFF;
+
+            if (r < 250 || g < 250 || b < 250) {
+                tinted++;
+            }
+
+            if (r == 0 && g == 0 && b == 0) {
+                black++;
+            }
+        }
+
+        return String.format("tinted %d/%d (%.2f%%), black %.2f%%, %s", tinted, texels,
+                100.0 * tinted / texels, 100.0 * black / texels, stats(read, texels));
     }
 
     /**

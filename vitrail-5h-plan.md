@@ -70,6 +70,41 @@ carte, pas du shader.
 
 **Livrable :** `~28/31`, plus la preuve de cohérence des deux chemins.
 
+### Bloc 2 — exécuté le 2026-11-08 à 18:48, et la prémisse était encore fausse
+
+`shadowtex0` n'était pas manquant non plus. Ce que la mesure a établi :
+
+| ce qui est lu | valeur mesurée |
+|---|---|
+| `shadowtex0`, `shadowtex1`, `shadowtex2` | **la même image de cascade** (`PACK_CASCADE`) |
+| `shadowtex1` pour un stage terrain | `VTextureSelector.SHADOW_SLOT`, donc la même carte que `shadowtex0` |
+| `shadowcolor0` pour un stage terrain | le **texel blanc** (`engineSlot` → `default`) |
+| image de teinte (chaîne) | 1536², `fmt=0x25`, **92,6 % de texels noirs**, moyenne (4, 6, 3), max 201 |
+| passe de teinte sous un pack | **jamais tirée** : `Config.isCamille()` exige `selectedShader == "radiance"` |
+| frame terrain après le bloc 2 | `0,4107–0,4125 / 0,5002–0,5030 / 0,5879–0,5893`, 0 erreur de compilation |
+
+**Conséquences, et elles ne sont pas cosmétiques**
+
+1. BSL lit `shadowtex1` sous `SHADOW_COLOR` pour décider si l'occulteur était translucide. Avec une
+   seule carte, le comparateur au même texel répond la même valeur : **la fonctionnalité est
+   absente**, pas fausse. Idem pour les caustiques d'eau.
+2. `shadowcolor0` répond le blanc à un pack. BSL multiplie ce blanc par `shadowtex1` et **élève le
+   produit au carré**, donc un texel occulté de facteur `s` ressort à `s + s²(1−s)` : jusqu'à +15 %
+   de lumière ajoutée dans la pénombre (maximum vers `s = 2/3`). C'est une dérivation depuis le
+   shader, **pas encore une mesure de bout en bout**.
+3. La passe de teinte et les casters d'entités sont sautés sous un pack : la porte est
+   `isCamille()`. Les entités ne projettent donc aucune ombre sur ce chemin.
+
+**Décision du bloc :** ne rien changer au comportement sans mesure. Un correctif plausible —
+répondre blanc là où l'image n'a pas été écrite — a été écrit puis **retiré** : le code de BSL montre
+que le blanc est justement le pire des deux choix, puisqu'il remet de la lumière dans la pénombre.
+Ce qui est livré : la sonde de teinte (mesure permanente), et la dérivation consignée dans
+`VitrailProgram.engineSlot`, à l'endroit exact où le nom est résolu pour un stage terrain.
+
+**A/B à faire, chiffré :** répondre noir au lieu du blanc pour `shadowcolor0` et comparer le facteur
+d'ombre moyen sur la même pose. Le noir est la réponse neutre tant qu'il n'y a qu'une carte ; le
+blanc est la réponse actuelle. La différence attendue est celle du terme `s²(1−s)`.
+
 ## Bloc 3 — 20:15 → 21:05 · La profondeur, prouvée sur géométrie réelle
 
 **Objectif :** une profondeur servie mais fausse est pire que pas de profondeur — les passes

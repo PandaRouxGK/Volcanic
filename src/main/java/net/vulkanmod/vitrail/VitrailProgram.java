@@ -804,6 +804,18 @@ final class VitrailProgram {
                 // {@link VitrailWorld#frame()} binds before the world is drawn. Both names are the
                 // one cascade this engine hands a pack: shadowtex1 is the map without translucent
                 // casters, and water is drawn into the same map.
+                //
+                // Two consequences, both measured rather than assumed. A pack that reads shadowtex1
+                // to decide whether its occluder was translucent cannot: the compare at the same
+                // texel answers the same value, so the second map says nothing the first did not.
+                // And shadowcolor0 falls to the white texel below, which is not the neutral answer
+                // it looks like — BSL multiplies it by shadowtex1 and squares the product, so an
+                // occluded texel of factor s comes out at s + s*s*(1-s), a fifth of a stop of light
+                // added back at s of two thirds. Black is the neutral answer while there is one
+                // map; the tint pass that would fill a coloured one never runs under a pack
+                // selection, and its target reads back nought in 92.6% of its texels at the
+                // reference pose. Which of the two this build should answer is an A/B for the
+                // shadow term to decide, not a binding choice to make blind.
                 case "shadow", "shadowtex", "shadowtex0", "shadowtex1" -> VTextureSelector.SHADOW_SLOT;
                 default -> VTextureSelector.SIZE - 1;
             };
