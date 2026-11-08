@@ -641,9 +641,13 @@ public final class VitrailPackChain implements AutoCloseable {
                 .append(this.stages.size() + (this.finalStage != null ? 1 : 0))
                 .append(" compiled=").append(this.programsCompiled)
                 .append(" refused=").append(this.programsRefused)
-                .append(" samplers=").append(this.samplersServed).append('/')
+                // Counted with no engine resolver in hand, so this is a floor and not a finding:
+                // at the draw, with the resolver, BSL 10.1.8 was measured at 31 of 31 answered and
+                // nought on the white texel, depthtex0 and depthtex1 included. Read as a gap, it
+                // sent a session after a depth texture the draw was already serving.
+                .append(" samplers_planned=").append(this.samplersServed).append('/')
                 .append(this.samplersServed + this.samplersUnserved)
-                .append(" unbound=").append(this.samplersUnserved)
+                .append(" unbound_in_plan=").append(this.samplersUnserved)
                 .append(" unbindable=").append(this.samplersUnbindable);
 
         if (this.failure != null) {
@@ -651,8 +655,8 @@ public final class VitrailPackChain implements AutoCloseable {
         }
 
         if (!this.unserved.isEmpty()) {
-            said.append("\n  unbound in the plan (colour targets and noise are what this build")
-                    .append(" can serve; the draw's own line is the measure): ")
+            said.append("\n  unbound in the plan (not one of the pack's own buffers: whether the")
+                    .append(" engine answers one is what the draw's own line says): ")
                     .append(String.join(", ", this.unserved));
         }
 
