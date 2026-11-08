@@ -363,8 +363,20 @@ public final class VitrailWorld implements AutoCloseable {
             return;
         }
 
-        VTextureSelector.bindTexture(VTextureSelector.SHADOW_SLOT, shadowDepth());
+        VulkanImage answer = shadowDepth();
+        VTextureSelector.bindTexture(VTextureSelector.SHADOW_SLOT, answer);
+
+        if (!REPORTED_SHADOW_SLOT) {
+            REPORTED_SHADOW_SLOT = true;
+            ShadowMap map = ShadowMap.active();
+            Initializer.LOGGER.info("Vitrail: terrain shadow slot, map {} ready {} enabled {} answer {}",
+                    map != null, map != null && map.isReady(), Initializer.CONFIG.shadowsEnabled,
+                    answer == VTextureSelector.getWhiteTexture() ? "the white texel" : "the sun's map");
+        }
     }
+
+    /** Whether the slot a terrain stage samples its occlusion from has been said in the log. */
+    private static boolean REPORTED_SHADOW_SLOT;
 
     /**
      * The depth of the sun's map this frame, or the white texel when the engine draws none.

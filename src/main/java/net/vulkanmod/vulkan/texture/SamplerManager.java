@@ -135,7 +135,12 @@ public abstract class SamplerManager {
             samplerInfo.addressModeU(VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER);
             samplerInfo.addressModeV(VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER);
             samplerInfo.addressModeW(VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER);
-            samplerInfo.borderColor(VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE);
+            // -Dvitrail.debug.shadow.border=black answers the border with nought instead of one, the
+            // arm a test of a pack's shadow coordinates needs: a fetch that lands outside the map is
+            // answered with the border and never reaches the comparison, so a frame that does not
+            // move when the border turns black is a frame that never read the map at all.
+            samplerInfo.borderColor("black".equals(System.getProperty("vitrail.debug.shadow.border"))
+                    ? VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK : VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE);
 
             samplerInfo.anisotropyEnable(false);
             samplerInfo.unnormalizedCoordinates(false);
