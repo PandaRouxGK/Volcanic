@@ -444,6 +444,11 @@ final class VitrailGlobals {
                 // Every other name is a member this engine has nothing to say about, and it is
                 // reported rather than left to be discovered from a picture: a single one of these
                 // at nought is enough to remove a term from the frame.
+                // The frame's rank inside eight and inside two: a pack dithers its sampling on
+                // them, and left at nought the dither never moves.
+                case "framemod8" -> put(slot, frameCounter % 8);
+                case "framemod2" -> put(slot, frameCounter % 2);
+
                 default -> this.unanswered.add(slot.name());
             }
         }
