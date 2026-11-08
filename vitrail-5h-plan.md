@@ -154,6 +154,30 @@ sonde `z` dans le shader de la passe qui la consomme, témoin compris.
 (test et attachement), puis alimenter la chaîne avec l'image que le monde a réellement écrite. Tant
 que ce n'est pas fait, aucun effet dépendant de la profondeur ne peut être jugé correct ou incorrect.
 
+### Bloc 3, suite — 19:03 : la profondeur n'est plus vide, mais pas encore complète
+
+Cause trouvée et corrigée : `resolvePostShader` prenait la profondeur d'un **snapshot du framebuffer
+« scaled »**, alors que le pack dessine son monde dans son propre framebuffer. Il préfère maintenant
+l'attachement de profondeur du framebuffer où le monde a réellement été dessiné.
+
+| mesure | avant | après |
+|---|---|---|
+| couverture de la profondeur du monde | **0/409 920 (0,0 %)** | **14 967/409 920 (3,7 %)** |
+| plage de profondeur | 1,0000..1,0000 | 0,9340..1,0000 |
+| AO que le pack en déduit | 1,0 partout | 1,0 partout |
+| image présentée | (198, 141, 80) | (198, 141, 80) — inchangée |
+
+**Lecture honnête :** la chaîne voit enfin de la géométrie, mais seulement de la **lointaine**
+(0,934 et au-delà), et l'AO reste à 1,0 partout — ce qui est cohérent, un rayon d'AO de 0,25 bloc
+ne trouvant pas d'occludeur à cette distance. Le terrain proche n'atterrit donc toujours pas.
+
+**Prochaine étape précise :** les pipelines du pack sont construits sans aucune notion de
+profondeur (`GpuPipeline`/`GpuDevice` n'en parlent pas ; `GraphicsPipeline` fige l'état au moment de
+la création). Il faut soit figer explicitement test + écriture de profondeur à la construction des
+pipelines du monde, soit vérifier qu'aucune passe ultérieure ne nettoie l'attachement avant la
+lecture par la chaîne. Ces deux hypothèses se départagent en une mesure : lire la profondeur juste
+après la passe monde, avant toute autre passe.
+
 ## Bloc 4 — 21:05 → 21:55 · Qui occupe vraiment l'écran
 
 **Objectif :** répondre chiffré à « quelle part de l'image chaque stage possède », ce qui conditionne

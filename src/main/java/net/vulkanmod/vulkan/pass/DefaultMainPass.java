@@ -1107,7 +1107,19 @@ public class DefaultMainPass implements MainPass {
 
         VulkanImage worldDepth = null;
         VulkanImage fgDepth = null;
-        if (this.capturedWorldDepth != null) {
+
+        // While a pack draws the world, that geometry lands in the pack's own framebuffer and never
+        // in the engine's scaled one, so a snapshot of the scaled one is a cleared depth wearing the
+        // name of the frame's. Read back at the reference pose it held nought covered in 409920
+        // texels and one in every value, and the chain drew every fog, depth of field and occlusion
+        // term it has against nothing. The image that holds the world is the attachment of the
+        // framebuffer the world was actually drawn into.
+        if (this.mainFramebuffer != null && this.mainFramebuffer != this.swapChain
+                && this.mainFramebuffer != this.scaledFramebuffer
+                && this.mainFramebuffer.getDepthAttachment() != null) {
+            worldDepth = this.mainFramebuffer.getDepthAttachment();
+            fgDepth = worldDepth;
+        } else if (this.capturedWorldDepth != null) {
             worldDepth = this.capturedWorldDepth;
             if (this.liveDepthIsForeground) {
                 fgDepth = this.scaledFramebuffer.getDepthAttachment();
