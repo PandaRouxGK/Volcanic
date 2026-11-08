@@ -90,6 +90,19 @@ public final class VitrailDebug {
     public static final boolean SUN_FIXED = ENABLED && Boolean.getBoolean("vitrail.debug.sunvec");
 
     /**
+     * Answers a terrain stage's first target with its lighting instead of its albedo:
+     * {@code -Dvitrail.debug.lightprobe=true}.
+     * <p>
+     * The three channels are the lighting the fragment really receives, the sun's share of it, and
+     * the shadow factor that gates that share. A frame's mean cannot answer the question this does,
+     * because the sky fills most of the buffer and reads no shadow map: at the reference pose the
+     * pack's first target moves by a few tenths of a percent between a real map and one forced fully
+     * shadowed, while the terrain's lighting term measured here moves by a third. Read it with
+     * {@code chain.limit=0}, so the buffer still holds what the world stage wrote.
+     */
+    public static final boolean LIGHT_PROBE = ENABLED && Boolean.getBoolean("vitrail.debug.lightprobe");
+
+    /**
      * Runs only the first few passes of the chain: {@code -Dvitrail.debug.chain.limit=0}.
      *
      * <p>nought or more leaves that many of the pack's own passes undrawn and skips the final one;
@@ -112,7 +125,7 @@ public final class VitrailDebug {
         }
 
         flagsLogged = true;
-        Initializer.LOGGER.info("Vitrail: debug flags, programs={}, probes={}, smoke={}, chain={}, draw={}, shadowprobe={}, chainLimit={}",
-                PROGRAMS, PROBES, SMOKE, CHAIN, DRAW, SHADOW_PROBE, CHAIN_LIMIT);
+        Initializer.LOGGER.info("Vitrail: debug flags, programs={}, probes={}, smoke={}, chain={}, draw={}, shadowprobe={}, lightprobe={}, chainLimit={}",
+                PROGRAMS, PROBES, SMOKE, CHAIN, DRAW, SHADOW_PROBE, LIGHT_PROBE, CHAIN_LIMIT);
     }
 }

@@ -280,7 +280,8 @@ final class VitrailProgram {
 
         if (!VitrailDebug.SHADOW_PROBE && !VitrailDebug.SUN_FIXED
                 && !Boolean.getBoolean("vitrail.debug.shadowzero")
-                && !Boolean.getBoolean("vitrail.debug.sunlit")) {
+                && !Boolean.getBoolean("vitrail.debug.sunlit")
+                && !VitrailDebug.LIGHT_PROBE) {
             return bound;
         }
 
@@ -336,10 +337,11 @@ final class VitrailProgram {
         }
 
         // Which end of the pack's own mix the terrain sits at: the sun taken as fully lit, against
-        // the sun gated by the map. Measured at the reference pose, colortex0 as the pack writes it
-        // is (0.4120, 0.5027, 0.5877); fully lit it is (0.4130, 0.5046, 0.5885) and fully shadowed
-        // (0.4137, 0.5058, 0.5883). The occlusion is worth two tenths of a percent of that buffer,
-        // which is what makes every A/B of the shadow map look like nothing happened.
+        // the sun gated by the map. A mean over the whole buffer cannot answer that, because the sky
+        // fills most of it and no sky pixel reads the shadow map: at the reference pose the buffer's
+        // mean moves by a few tenths of a percent between those two arms, while the terrain's own
+        // lighting term moves by a third. The per-fragment probe below is the measure; this arm is
+        // only here to show that the map's answer reaches the mix at all.
         String mix = "vec3 sceneLighting = mix(ambientCol * lightmap.y, lightCol, fullShadow * shadowMult);";
 
         if (Boolean.getBoolean("vitrail.debug.sunlit") && fragment.contains(mix)) {
@@ -349,15 +351,45 @@ final class VitrailProgram {
             Initializer.LOGGER.info("Vitrail: '{}' takes the sun as fully lit", name);
         }
 
+        // The terrain's own lighting, per fragment, in the pack's first target: the term a frame's
+        // mean cannot show, because the sky fills most of the buffer and reads no shadow map. The
+        // luminance is taken where the pack has finished building it, after the sky level and the
+        // scattering have scaled it, so the number is what the mix really contributes and not the
+        // mix before it is weighted. The middle channel is the sun's share and the last is the
+        // shadow factor itself, which is what an A/B of the map moves.
+        if (VitrailDebug.LIGHT_PROBE && name.startsWith("gbuffers_")
+                && fragment.contains(mix)) {
+            String probeMix = fragment.replace("#version 460 core",
+                            "#version 460 core\nvec3 ofProbeLighting;")
+                    .replace("sceneLighting *= skylightSqr * (1.0 + scattering * shadow);",
+                            "sceneLighting *= skylightSqr * (1.0 + scattering * shadow);"
+                                    + "\n    ofProbeLighting = vec3("
+                                    + "dot(sceneLighting, vec3(0.2126, 0.7152, 0.0722)), "
+                                    + "dot(lightCol, vec3(0.2126, 0.7152, 0.0722)) * fullShadow.r * shadowMult, "
+                                    + "fullShadow.r * shadowMult);")
+                    .replace("ofFragData0 = albedo;",
+                            "ofFragData0 = vec4(clamp(ofProbeLighting, vec3(0.0), vec3(1.0)), 1.0);");
+            changed = !probeMix.equals(fragment);
+            fragment = probeMix;
+
+            if (changed) {
+                Initializer.LOGGER.info(
+                        "Vitrail: '{}' answers its first target with (lighting, sun term, shadow factor)",
+                        name);
+            }
+        }
+
         String decided = "vec3 fullShadow = max(shadow * NoL, vec3(0.0));";
         String written = "ofFragData0 = albedo;";
 
         if (VitrailDebug.SHADOW_PROBE && fragment.contains(decided) && fragment.contains(written)) {
             fragment = fragment.replace("#version 460 core", "#version 460 core\nvec3 ofProbeDecided;")
                     .replace(decided, decided + "\n\tofProbeDecided = vec3(shadow.r, fullShadow.r, NoL);")
+                    .replace("float shadowMult = (1.0 - 0.95 * rainStrength) * shadowFade;",
+                            "float shadowMult = (1.0 - 0.95 * rainStrength) * shadowFade;\n\tofProbeDecided.z = shadowFade;")
                     .replace(written, "ofFragData0 = vec4(clamp(ofProbeDecided, vec3(0.0), vec3(1.0)), 1.0);");
             changed = true;
-            Initializer.LOGGER.info("Vitrail: '{}' answers its first target with (shadow, fullShadow, NoL)", name);
+            Initializer.LOGGER.info("Vitrail: '{}' answers its first target with (shadow, fullShadow, shadowMult)", name);
         }
 
         return changed ? new Bound(bound.vertex(), fragment) : bound;

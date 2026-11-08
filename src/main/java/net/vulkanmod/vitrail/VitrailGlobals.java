@@ -93,6 +93,7 @@ final class VitrailGlobals {
     private static float frameTime;
     private static float frameTimeCounter;
     private static long lastNanos;
+    private static boolean lightingUniformsReported;
 
     /** Whether this program draws the pack's quad, whose corners are already clip space. */
     private final boolean fullscreen;
@@ -456,6 +457,25 @@ final class VitrailGlobals {
         if (!this.reportedUnanswered && VitrailDebug.ENABLED) {
             reportUnanswered();
         }
+
+        if (!lightingUniformsReported && VitrailDebug.ENABLED
+                && Boolean.getBoolean("vitrail.debug.lightinguniforms")) {
+            lightingUniformsReported = true;
+            Initializer.LOGGER.info(
+                    "Vitrail: lighting uniforms dayTime={} partial={} timeAngle={} shadowFade={} rainStrength={} sunVec=({}, {}, {})",
+                    dayTime, partial, memberValue("timeAngle"), memberValue("shadowFade"),
+                    memberValue("rainStrength"), sun.x, sun.y, sun.z);
+        }
+    }
+
+    private float memberValue(String name) {
+        for (Slot slot : this.slots) {
+            if (slot.name().equals(name)) {
+                return this.values.get(slot.offset());
+            }
+        }
+
+        return Float.NaN;
     }
 
     /** What the pack calls a water eye, a lava eye, or a snow eye, in Iris's numbering. */
