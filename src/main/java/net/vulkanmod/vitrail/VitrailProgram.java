@@ -279,7 +279,8 @@ final class VitrailProgram {
         bound = attachmentProbe(bound, name);
 
         if (!VitrailDebug.SHADOW_PROBE && !VitrailDebug.SUN_FIXED
-                && !Boolean.getBoolean("vitrail.debug.shadowzero")) {
+                && !Boolean.getBoolean("vitrail.debug.shadowzero")
+                && !Boolean.getBoolean("vitrail.debug.sunlit")) {
             return bound;
         }
 
@@ -332,6 +333,18 @@ final class VitrailProgram {
             fragment = fragment.replace(tap, "float shadow0 = 0.0 * texture2DShadow(shadowtex0,");
             changed = true;
             Initializer.LOGGER.info("Vitrail: '{}' multiplies its shadow tap by nought", name);
+        }
+
+        // Which end of the pack's own mix the terrain sits at: the sun taken as fully lit, against
+        // the sun gated by the map. The two numbers say what the map answers and how much the sun
+        // is worth in the picture.
+        String mix = "vec3 sceneLighting = mix(ambientCol * lightmap.y, lightCol, fullShadow * shadowMult);";
+
+        if (Boolean.getBoolean("vitrail.debug.sunlit") && fragment.contains(mix)) {
+            fragment = fragment.replace(mix,
+                    "vec3 sceneLighting = mix(ambientCol * lightmap.y, lightCol, 1.0);");
+            changed = true;
+            Initializer.LOGGER.info("Vitrail: '{}' takes the sun as fully lit", name);
         }
 
         String decided = "vec3 fullShadow = max(shadow * NoL, vec3(0.0));";
