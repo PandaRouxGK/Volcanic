@@ -253,6 +253,14 @@ final class VitrailProgram {
             return bound;
         }
 
+        // One program at a time, by name: a constant in every stage answers "does this value reach
+        // the frame" but not "which stage's output is the frame made of".
+        String only = System.getProperty("vitrail.debug.attachprogram");
+
+        if (only != null && !only.equals(name)) {
+            return bound;
+        }
+
         String target = "ofFragData" + channel;
         String value = System.getProperty("vitrail.debug.attachvalue", "0.5, 0.6, 0.7, 0.8");
         String text = bound.fragment();
