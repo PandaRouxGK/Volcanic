@@ -918,7 +918,11 @@ public final class VitrailPackChain implements AutoCloseable {
                 // The raw dump beside it, which is what another run is compared against: a bytes
                 // comparison needs no decode, and a decode that is wrong reads as a stable picture
                 // instead of as an error.
-                if (this.probeReports == 1) {
+                // The second report and not the first: a copy out of a buffer the allocator has
+                // just handed over comes back with the previous reader's contents, which is a
+                // picture of something rather than an error and therefore the worse of the two
+                // failures to look at.
+                if (this.probeReports == 2) {
                     writeRaw(values, target.width * target.height * format.bytesPerTexel,
                             "vitrail-colortex" + buffer.getKey() + ".raw");
                     writeBuffer(values, target.width, target.height, format,
