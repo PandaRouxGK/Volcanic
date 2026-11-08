@@ -267,6 +267,22 @@ final class VitrailProgram {
             }
         }
 
+        if (Boolean.getBoolean("vitrail.debug.shadowzero")) {
+            String wrapper = "float texture2DShadow(sampler2DShadow shadowtex, vec3 shadowPos) {";
+            int at = fragment.indexOf(wrapper);
+
+            if (at >= 0) {
+                int close = fragment.indexOf("}", at);
+
+                if (close > at) {
+                    fragment = fragment.substring(0, at + wrapper.length()) + " return 0.0; "
+                            + fragment.substring(close);
+                    changed = true;
+                    Initializer.LOGGER.info("Vitrail: '{}' reads every shadow tap as nought", name);
+                }
+            }
+        }
+
         String decided = "vec3 fullShadow = max(shadow * NoL, vec3(0.0));";
         String written = "ofFragData0 = albedo;";
 
