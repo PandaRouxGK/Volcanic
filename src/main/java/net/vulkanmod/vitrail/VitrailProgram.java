@@ -238,25 +238,36 @@ final class VitrailProgram {
      * does not light anything is compiled from its own text.
      */
     static Bound shadowProbe(Bound bound, String name) {
-        if (!VitrailDebug.SHADOW_PROBE) {
+        if (!VitrailDebug.SHADOW_PROBE && !VitrailDebug.SUN_FIXED) {
             return bound;
         }
 
         String fragment = bound.fragment();
+        boolean changed = false;
+
+        if (VitrailDebug.SUN_FIXED) {
+            String taken = "vec3 lightVec = sunVec *";
+
+            if (fragment.contains(taken)) {
+                fragment = fragment.replace(taken,
+                        "vec3 lightVec = normalize(vec3(-0.35, 0.82, 0.45)) *");
+                changed = true;
+                Initializer.LOGGER.info("Vitrail: '{}' decides its light with a fixed sun direction", name);
+            }
+        }
+
         String decided = "vec3 fullShadow = max(shadow * NoL, vec3(0.0));";
         String written = "ofFragData0 = albedo;";
 
-        if (!fragment.contains(decided) || !fragment.contains(written)) {
-            return bound;
+        if (VitrailDebug.SHADOW_PROBE && fragment.contains(decided) && fragment.contains(written)) {
+            fragment = fragment.replace("#version 460 core", "#version 460 core\nvec3 ofProbeDecided;")
+                    .replace(decided, decided + "\n\tofProbeDecided = vec3(shadow.r, fullShadow.r, NoL);")
+                    .replace(written, "ofFragData0 = vec4(clamp(ofProbeDecided, vec3(0.0), vec3(1.0)), 1.0);");
+            changed = true;
+            Initializer.LOGGER.info("Vitrail: '{}' answers its first target with (shadow, fullShadow, NoL)", name);
         }
 
-        fragment = fragment.replace("#version 460 core",
-                "#version 460 core\nvec3 ofProbeDecided;")
-                .replace(decided, decided + "\n	ofProbeDecided = vec3(shadow.r, fullShadow.r, NoL);")
-                .replace(written, "ofFragData0 = vec4(clamp(ofProbeDecided, vec3(0.0), vec3(1.0)), 1.0);");
-        Initializer.LOGGER.info("Vitrail: '{}' answers its first target with (shadow, fullShadow, NoL)", name);
-
-        return new Bound(bound.vertex(), fragment);
+        return changed ? new Bound(bound.vertex(), fragment) : bound;
     }
 
     static void dump(String name, String vertex, String fragment) {

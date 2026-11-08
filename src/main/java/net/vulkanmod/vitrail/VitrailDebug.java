@@ -80,6 +80,16 @@ public final class VitrailDebug {
     public static final boolean SHADOW_PROBE = ENABLED && Boolean.getBoolean("vitrail.debug.shadowprobe");
 
     /**
+     * Turns the sun a stage lights by into a fixed direction, the arm an A/B of the sun term needs.
+     * <p>
+     * The pack it is written for takes its sun as a vertex attribute, {@code in vec3 sunVec}, which
+     * a chunk mesh of this engine carries no element for: the attribute reads nought, so the light
+     * vector is nought, so {@code NoL} is nought and the sun's term is multiplied by it. A frame
+     * that does not move when the direction is pinned down is a frame whose sun never arrives.
+     */
+    public static final boolean SUN_FIXED = ENABLED && Boolean.getBoolean("vitrail.debug.sunvec");
+
+    /**
      * Runs only the first few passes of the chain: {@code -Dvitrail.debug.chain.limit=0}.
      *
      * <p>nought or more leaves that many of the pack's own passes undrawn and skips the final one;

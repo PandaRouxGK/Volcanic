@@ -491,9 +491,13 @@ public final class VitrailPackChain implements AutoCloseable {
             throw new IllegalStateException("the pack serves only one of the two stages");
         }
 
-        VitrailProgram.Bound bound = VitrailProgram.assignVaryings(
+        // The same two arms the world's stage answers to, on the passes that actually shade the
+        // frame: this pack is deferred, so the sun term and the shadow it is gated on live in
+        // composite rather than in the geometry stage, and a measure attached only to the geometry
+        // stage says "nothing moved" about a program whose answer was never in the picture.
+        VitrailProgram.Bound bound = VitrailProgram.shadowProbe(VitrailProgram.assignVaryings(
                 VitrailProgram.assignBindings(VitrailProgram.fullscreenCorners(vertex.text()),
-                        fragment.text()));
+                        fragment.text())), name);
 
         VitrailProgram.dump(name, bound.vertex(), bound.fragment());
         GpuPipeline.Builder builder = GpuDevice.program(name, bound.vertex(), bound.fragment());
