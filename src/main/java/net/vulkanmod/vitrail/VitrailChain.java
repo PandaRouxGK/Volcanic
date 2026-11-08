@@ -533,6 +533,11 @@ public final class VitrailChain {
         return DRAWS_WORLD;
     }
 
+    /** The buffers the world's own geometry stage writes, in draw buffer order. */
+    public java.util.List<Integer> worldTargets() {
+        return this.worldTargets;
+    }
+
     public Framebuffer worldFramebuffer(int width, int height, VulkanImage depth) {
         if (this.colortex[0] == null || width <= 0 || height <= 0
                 || this.width != width || this.height != height) {
@@ -554,6 +559,18 @@ public final class VitrailChain {
 
         this.worldDepth = depth;
         this.worldFramebuffer = Framebuffer.builder(colour, depth).build();
+
+        // Said once per build: which image sits at each location of the pass the world is drawn
+        // into, so a buffer a later pass reads at nought can be matched to the attachment it was
+        // supposed to hold, or shown to be a different image altogether.
+        if (VitrailDebug.ENABLED) {
+            StringBuilder held = new StringBuilder();
+            for (int i = 0; i < colour.length; i++) {
+                held.append(' ').append(this.worldTargets.get(i)).append('#')
+                        .append(System.identityHashCode(colour[i]));
+            }
+            Initializer.LOGGER.info("Vitrail: world framebuffer holds{}", held);
+        }
         return this.worldFramebuffer;
     }
 

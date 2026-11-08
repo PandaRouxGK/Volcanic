@@ -237,7 +237,38 @@ final class VitrailProgram {
      * The rewrite touches a stage only when both of the lines it needs are there, so a program that
      * does not light anything is compiled from its own text.
      */
+    /**
+     * Writes a known colour into one of the pack's colour outputs, and nothing else.
+     * <p>
+     * A stage that declares four outputs and a pipeline that receives one attachment drop the
+     * other three in silence: the buffer a later pass reads is then nought everywhere while the
+     * shader looks correct. Handing attachment n a constant of its own separates the two: if the
+     * read back buffer holds the constant the write landed and the pack itself wrote nought, and
+     * if it still holds nought the write never reached the image.
+     */
+    static Bound attachmentProbe(Bound bound, String name) {
+        Integer channel = Integer.getInteger("vitrail.debug.attach");
+
+        if (channel == null) {
+            return bound;
+        }
+
+        String target = "ofFragData" + channel;
+        String text = bound.fragment();
+        String replaced = text.replaceAll(target + "\s*=\s*[^;]*;",
+                target + " = vec4(0.5, 0.6, 0.7, 0.8);");
+
+        if (replaced.equals(text)) {
+            return bound;
+        }
+
+        Initializer.LOGGER.info("Vitrail: '{}' writes a constant into {}", name, target);
+        return new Bound(bound.vertex(), replaced);
+    }
+
     static Bound shadowProbe(Bound bound, String name) {
+        bound = attachmentProbe(bound, name);
+
         if (!VitrailDebug.SHADOW_PROBE && !VitrailDebug.SUN_FIXED
                 && !Boolean.getBoolean("vitrail.debug.shadowzero")) {
             return bound;

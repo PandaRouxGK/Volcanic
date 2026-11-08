@@ -14,6 +14,7 @@ import dev.vitrail.pack.source.ShaderPackSource;
 import dev.vitrail.pack.source.ShaderProperties;
 import dev.vitrail.uniform.NoiseTexture;
 import net.vulkanmod.Initializer;
+import net.vulkanmod.vulkan.framebuffer.Framebuffer;
 import net.vulkanmod.vitrail.gpu.GpuBuffer;
 import net.vulkanmod.vitrail.gpu.GpuDevice;
 import net.vulkanmod.vitrail.gpu.GpuFormat;
@@ -292,6 +293,56 @@ public final class VitrailPackChain implements AutoCloseable {
 
             this.targets.put(index, new GpuTexture[]{main, alt});
         }
+    }
+
+    private Framebuffer worldFramebuffer;
+    private VulkanImage worldDepth;
+    private List<VulkanImage> worldColour;
+
+    /**
+     * The pass the engine draws the world into: this chain's own colour targets, in the order the
+     * pack's geometry stage writes them.
+     * <p>
+     * The engine had a set of images of its own for this pass, and this chain allocated a second
+     * set with the pack's formats and sizes. A fragment stage writing four outputs landed its
+     * first output in the engine's set and the other three in nothing the chain would ever read:
+     * the shadow mask a deferred pass samples was nought everywhere, and no A/B of that mask could
+     * move the frame. Building this pass over the chain's textures is what puts them in one place.
+     */
+    public Framebuffer worldFramebuffer(int width, int height, VulkanImage depth,
+                                       List<Integer> written) {
+        if (written == null || written.isEmpty() || depth == null) {
+            return null;
+        }
+
+        List<VulkanImage> colour = new ArrayList<>(written.size());
+
+        for (int index : written) {
+            GpuTexture[] pair = this.targets.get(index);
+
+            if (pair == null || pair[0].image().width != width || pair[0].image().height != height) {
+                return null;
+            }
+
+            colour.add(pair[0].image());
+        }
+
+        if (this.worldFramebuffer != null && this.worldDepth == depth
+                && colour.equals(this.worldColour)) {
+            return this.worldFramebuffer;
+        }
+
+        this.worldColour = colour;
+        this.worldDepth = depth;
+
+        if (this.worldFramebuffer != null) {
+            this.worldFramebuffer.cleanUp(false);
+        }
+
+        this.worldFramebuffer = Framebuffer.builder(colour.toArray(new VulkanImage[0]), depth).build();
+        Initializer.LOGGER.info("Vitrail: the world's pass holds colortex{} at {}x{}", written,
+                width, height);
+        return this.worldFramebuffer;
     }
 
     private void compile(PackProgram.Chain chain) {
@@ -915,8 +966,11 @@ public final class VitrailPackChain implements AutoCloseable {
 
                 ByteBuffer values = read.copyOut();
 
-                Initializer.LOGGER.info("Vitrail: pack chain probe, frame {} colortex{} {}x{} {}, {}",
-                        this.framesDrawn - 1, buffer.getKey(), target.width, target.height,
+                // The image's own identity is in the line: a buffer read at nought is then matched
+                // to the attachment the world's pass holds, or shown to be another image.
+                Initializer.LOGGER.info("Vitrail: pack chain probe, frame {} colortex{}#{} {}x{} {}, {}",
+                        this.framesDrawn - 1, buffer.getKey(), System.identityHashCode(target),
+                        target.width, target.height,
                         format.name(), bufferStats(values, target.width, target.height, format));
 
                 // The raw dump beside it, which is what another run is compared against: a bytes

@@ -28,6 +28,7 @@ public class GraphicsPipeline extends Pipeline {
     private static final Set<String> loggedPipelineFailures = ConcurrentHashMap.newKeySet();
 
     private static int builds;
+    private static int attachmentLogs;
     private static long buildNanos;
 
     private final VertexFormat vertexFormat;
@@ -185,6 +186,17 @@ public class GraphicsPipeline extends Pipeline {
             int colorAttachmentCount = 1;
             if (!Vulkan.DYNAMIC_RENDERING && state.renderPass != null && state.renderPass.getFramebuffer() != null) {
                 colorAttachmentCount = Math.max(1, state.renderPass.getFramebuffer().getColorAttachmentCount());
+            }
+
+            // Said for the first few pipelines only: a stage that declares four outputs and a
+            // pipeline built against one attachment drops the other three in silence, and the
+            // buffer a later pass reads is then nought everywhere.
+            if (net.vulkanmod.vitrail.VitrailDebug.ENABLED
+                    && (colorAttachmentCount > 1 || attachmentLogs < 6)) {
+                attachmentLogs++;
+                net.vulkanmod.Initializer.LOGGER.info(
+                        "Vitrail: pipeline '{}' built with {} colour attachment(s), pass {}",
+                        this.name, colorAttachmentCount, System.identityHashCode(state.renderPass));
             }
 
             VkPipelineColorBlendAttachmentState.Buffer colorBlendAttachment = VkPipelineColorBlendAttachmentState.calloc(colorAttachmentCount, stack);

@@ -388,7 +388,17 @@ public class DefaultMainPass implements MainPass {
                 return false;
             }
 
-            Framebuffer world = chain.worldFramebuffer(width, height, this.scaledFramebuffer.getDepthAttachment());
+            net.vulkanmod.vulkan.texture.VulkanImage depth = this.scaledFramebuffer.getDepthAttachment();
+
+            // The chain's own targets first: the world's outputs have to land in the buffers the
+            // pack's passes sample, and those are the chain's, not a second set of the engine's.
+            Framebuffer world = net.vulkanmod.vitrail.VitrailPackChain.drawing(pack,
+                    net.vulkanmod.vitrail.VitrailChain.dimensionFolder(), width, height)
+                    .worldFramebuffer(width, height, depth, chain.worldTargets());
+
+            if (world == null) {
+                world = chain.worldFramebuffer(width, height, depth);
+            }
 
             if (world == null) {
                 return false;
