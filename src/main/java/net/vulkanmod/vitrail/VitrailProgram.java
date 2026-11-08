@@ -257,7 +257,7 @@ final class VitrailProgram {
         // the frame" but not "which stage's output is the frame made of".
         String only = System.getProperty("vitrail.debug.attachprogram");
 
-        if (only != null && !only.equals(name)) {
+        if (only != null && !name.endsWith(only)) {
             return bound;
         }
 
