@@ -238,7 +238,8 @@ final class VitrailProgram {
      * does not light anything is compiled from its own text.
      */
     static Bound shadowProbe(Bound bound, String name) {
-        if (!VitrailDebug.SHADOW_PROBE && !VitrailDebug.SUN_FIXED) {
+        if (!VitrailDebug.SHADOW_PROBE && !VitrailDebug.SUN_FIXED
+                && !Boolean.getBoolean("vitrail.debug.shadowzero")) {
             return bound;
         }
 
@@ -253,6 +254,16 @@ final class VitrailProgram {
                         "vec3 lightVec = normalize(vec3(-0.35, 0.82, 0.45)) *");
                 changed = true;
                 Initializer.LOGGER.info("Vitrail: '{}' decides its light with a fixed sun direction", name);
+            }
+        }
+
+        if (Boolean.getBoolean("vitrail.debug.shadowzero")) {
+            String read = "float shadow0 = vec4(textureLod(shadowtex0, sampleShadowPos.xyz, 0.0)).z;";
+
+            if (fragment.contains(read)) {
+                fragment = fragment.replace(read, "float shadow0 = 0.0;");
+                changed = true;
+                Initializer.LOGGER.info("Vitrail: '{}' reads its shadow as nought", name);
             }
         }
 
