@@ -315,6 +315,17 @@ final class VitrailProgram {
             }
         }
 
+        // BSL's own shadow read, at the line every stage that reads an occlusion shares: the tap is
+        // kept and multiplied by nought, so the expression stays a float and the rest of the stage
+        // compiles exactly as it did.
+        String tap = "float shadow0 = texture2DShadow(shadowtex0,";
+
+        if (Boolean.getBoolean("vitrail.debug.shadowzero") && fragment.contains(tap)) {
+            fragment = fragment.replace(tap, "float shadow0 = 0.0 * texture2DShadow(shadowtex0,");
+            changed = true;
+            Initializer.LOGGER.info("Vitrail: '{}' multiplies its shadow tap by nought", name);
+        }
+
         String decided = "vec3 fullShadow = max(shadow * NoL, vec3(0.0));";
         String written = "ofFragData0 = albedo;";
 
