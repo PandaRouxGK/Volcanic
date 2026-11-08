@@ -308,6 +308,18 @@ public final class EngineDefines {
 					Integer.toString(ordinal));
 		}
 
+				// -Dvitrail.debug.define=SYMBOL,SYMBOL: extra symbols for an A/B of a pack branch, since a
+		// pack whose options leave a branch off compiles the other one and says nothing about it.
+		String extra = System.getProperty("vitrail.debug.define");
+
+		if (extra != null) {
+			for (String symbol : extra.split(",")) {
+				if (!symbol.isBlank()) {
+					defines.put(symbol.trim(), "");
+				}
+			}
+		}
+
 		return defines;
 	}
 
